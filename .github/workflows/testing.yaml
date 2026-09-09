@@ -281,6 +281,86 @@ jobs:
           echo "Missing SBOM permitted when opted in ✅"
 
   ### Unit tests for the report evaluation ###
+      # The cache is unavailable to a plain `act`-style run but present
+      # in CI, so these exercise the mode end to end rather than just
+      # the input validation.
+      - name: "Scan with cache-db restore-only"
+        id: restore-only
+        uses: ./
+        with:
+          target: 'registry:alpine:3.10'
+          fail-on: 'none'
+          cache-db: 'restore-only'
+          output-prefix: 'grype-restore-only'
+          upload-artifact: 'false'
+
+      - name: "Validate restore-only produced a scan"
+        shell: bash
+        env:
+          TOTAL: ${{ steps.restore-only.outputs.total-matches }}
+        run: |
+          set -euo pipefail
+          # A cache miss must not stop the scan: Grype fetches the
+          # database itself, so the run is slower, never broken.
+          if [ ! -s grype-restore-only.json ]; then
+            echo "restore-only produced no JSON report"
+            exit 1
+          fi
+          # Checked for shape before value. A non-numeric total makes
+          # the -le comparison exit 2, which an `if` reads as false
+          # and `set -e` does not catch inside a condition, so the
+          # test would pass on exactly the malformed output it exists
+          # to detect.
+          case "${TOTAL}" in
+            '' | *[!0-9]*)
+              echo "expected a numeric total-matches, got '${TOTAL}'"
+              exit 1
+              ;;
+          esac
+          if [ "${TOTAL}" -le 0 ]; then
+            echo "expected matches from alpine:3.10, got '${TOTAL}'"
+            exit 1
+          fi
+          echo "restore-only scanned normally (${TOTAL} matches)"
+
+      - name: "Mixed-case cache-db stays accepted"
+        uses: ./
+        with:
+          target: 'registry:alpine:3.10'
+          fail-on: 'none'
+          # Upstream read this through core.getInput(), which trims,
+          # and compared case-insensitively, so callers already pass
+          # values shaped like this; rejecting them would break them.
+          cache-db: ' TRUE '
+          output-prefix: 'grype-cache-case'
+          upload-artifact: 'false'
+          summary: 'false'
+
+      - name: "Invalid cache-db"
+        id: bad-cache-db
+        continue-on-error: true
+        uses: ./
+        with:
+          target: 'registry:alpine:3.10'
+          fail-on: 'none'
+          cache-db: 'restore_only'
+          upload-artifact: 'false'
+
+      - name: "Error if invalid cache-db did NOT fail"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.bad-cache-db.outcome }}
+        run: |
+          set -euo pipefail
+          # A typo must fail loudly. Treated as "not true" it would
+          # silently disable the cache and cost a full database
+          # download every run with nothing to explain why.
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "expected failure, got '${OUTCOME}'"
+            exit 1
+          fi
+          echo "invalid cache-db rejected as expected"
+
   unit:
     name: "Evaluate script unit tests"
     runs-on: ubuntu-latest
@@ -325,3 +405,4 @@ jobs:
           set -euo pipefail
           python3 tests/test_evaluate.py
           python3 tests/test_collect_bypasses.py
+          python3 tests/test_db_cache.py

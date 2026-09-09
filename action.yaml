@@ -121,7 +121,36 @@ inputs:
     required: false
     default: ""
   cache-db:
-    description: "Cache the Grype vulnerability database between runs"
+    description: >-
+      How to use the GitHub Actions cache for the Grype vulnerability
+      database. 'true' restores the database and saves it when the run
+      brings in a build the cache does not already hold; 'false'
+      disables caching entirely; 'restore-only' restores but never
+      saves.
+
+      Entries are keyed on the Grype version, the database source and
+      the database build time,
+      'grype-db-<version>-<source>-<build-time>'. Restores match on the
+      'grype-db-<version>-<source>-' prefix and return the most
+      recently created entry under it, which is the newest build so
+      long as one job writes that prefix. Rotating on the build time is
+      what lets the cache be refreshed at all: Actions entries are
+      immutable, so a key fixed on the version alone can never be
+      replaced once written. The source segment is a hash of the update
+      URL Grype resolves, so jobs scanning against different feeds
+      cannot share an entry.
+
+      Use 'restore-only' for concurrent jobs, such as a matrix leg per
+      component, paired with one job running 'true' to keep the entry
+      current; see "Concurrency and the database cache" in the README.
+
+      Caching is skipped, with a warning and no effect on the scan,
+      when an entry would be unsafe or meaningless: db.auto-update is
+      false, db.cache-dir is not an absolute POSIX path or contains a
+      directory the run keeps its own files in, the database update URL
+      cannot be read, extra-args carries a config or profile flag the
+      cache steps cannot see, or Grype does not report its resolved
+      configuration.
     required: false
     default: "true"
 
@@ -258,6 +287,8 @@ runs:
         INPUT_PREFIX: ${{ inputs.output-prefix }}
         INPUT_MAX_ROWS: ${{ inputs.summary-max-rows }}
         INPUT_MAX_AGE: ${{ inputs.bypass-max-age-days }}
+        INPUT_CACHE_DB: ${{ inputs.cache-db }}
+        INPUT_EXTRA_ARGS: ${{ inputs.extra-args }}
         INPUT_RETENTION: ${{ inputs.retention-days }}
         INPUT_BYPASS_REPO: ${{ inputs.bypass-repository }}
       run: |
@@ -288,6 +319,32 @@ runs:
           *)
             echo "::error::sort-by must be one of package, severity," \
               "epss, risk, kev, vulnerability; got '${INPUT_SORT_BY}'"
+            exit 1
+            ;;
+        esac
+
+        # Rejected rather than coerced: anchore/scan-action treats any
+        # value that is not exactly 'true' as false, so a typo such as
+        # 'restore_only' would silently disable caching and cost a
+        # full database download on every run with nothing to show
+        # why.
+        #
+        # Trimmed and case-folded before validating. The upstream
+        # action read this through core.getInput(), which strips
+        # surrounding whitespace, and then compared with
+        # .toLowerCase() - so values like ' TRUE ' have always worked.
+        # A composite receives the input verbatim, so both steps have
+        # to be repeated here or this validation would reject inputs
+        # that callers are using today.
+        cache_db="${INPUT_CACHE_DB#"${INPUT_CACHE_DB%%[![:space:]]*}"}"
+        cache_db="${cache_db%"${cache_db##*[![:space:]]}"}"
+        cache_db=$(printf '%s' "${cache_db}" \
+          | tr '[:upper:]' '[:lower:]')
+        case "${cache_db}" in
+          true|false|restore-only) ;;
+          *)
+            echo "::error::cache-db must be one of true, false," \
+              "restore-only; got '${INPUT_CACHE_DB}'"
             exit 1
             ;;
         esac
@@ -336,13 +393,323 @@ runs:
 
         echo "Inputs validated ✅"
 
+        # extra-args is a raw escape hatch appended to the scan argv,
+        # so it can carry Grype's own configuration flags. The cache
+        # steps cannot see it, and would then key and refresh one
+        # configuration while the scan reads another - an ineffective
+        # cache at best, a database from the wrong feed at worst.
+        # --profile counts too: a profile can set db.update-url,
+        # db.cache-dir or db.auto-update just as a config file can.
+        # Caching is switched off rather than the run rejected:
+        # passing configuration this way is legal, so the scan keeps
+        # working exactly as asked and only the optimisation that
+        # cannot account for it is dropped.
+        if [ "${cache_db}" != "false" ]; then
+          # Word-split the argv and judge each token, which pflag makes
+          # necessary: a config can be spelled -c cfg, -c=cfg, -ccfg,
+          # --config cfg, --config=cfg, or bundled behind boolean
+          # shorthands as -qccfg. Any single-dash token containing 'c'
+          # is treated as one; no other Grype shorthand uses 'c', and a
+          # false match costs only the cache. Globbing is off so a
+          # pattern in extra-args cannot expand to filenames here.
+          set -f
+          for tok in ${INPUT_EXTRA_ARGS}; do
+            case "${tok}" in
+              --config | --config=* | --profile | --profile=*) ;;
+              --*) continue ;;
+              -*c*) ;;
+              *) continue ;;
+            esac
+            echo "::warning::extra-args carries a Grype config or" \
+              "profile flag, which the database cache cannot account" \
+              "for; disabling the cache for this run. Use the" \
+              "'config' input instead to keep it"
+            cache_db="false"
+            break
+          done
+          set +f
+        fi
+
+        # Publish the normalised value so every later step branches on
+        # one spelling rather than re-folding the raw input.
+        echo "cache-db=${cache_db}" >> "${GITHUB_OUTPUT}"
+
     - name: "Install Grype"
       id: grype
       # yamllint disable-line rule:line-length
       uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
       with:
         grype-version: ${{ inputs.grype-version }}
-        cache-db: ${{ inputs.cache-db }}
+        # Caching is owned below, in every mode. Upstream keys the
+        # entry on the Grype version alone, and Actions cache entries
+        # are immutable, so once that key exists it can never be
+        # refreshed: every later run restores a database that is a
+        # little more stale, fails to overwrite it, and keeps it alive
+        # past normal eviction by reading it.
+        cache-db: "false"
+
+    - name: "Resolve Grype DB cache location"
+      id: grype-db
+      if: steps.validate.outputs.cache-db != 'false'
+      shell: bash
+      env:
+        GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        GRYPE_CHECK_FOR_APP_UPDATE: "false"
+      run: |
+        set -euo pipefail
+        # The same --config the scan uses: a config that moves
+        # db.cache-dir would otherwise have this resolve the default
+        # directory while the scan reads another, so the entry saved
+        # and restored is not the database being scanned against.
+        #
+        # ${cfg[@]+"${cfg[@]}"} rather than "${cfg[@]}": under `set -u`
+        # bash 3.2 - which macOS ships as /bin/bash - treats an empty
+        # array expansion as an unbound variable and aborts.
+        cfg=()
+        [ -n "${INPUT_CONFIG}" ] && cfg+=(--config "${INPUT_CONFIG}")
+        if [ -n "${INPUT_CONFIG}" ] && [ ! -f "${INPUT_CONFIG}" ]; then
+          echo "::error::config not found: ${INPUT_CONFIG}"
+          exit 1
+        fi
+        # The cache is an optimisation, so every condition that makes
+        # an entry unsafe or meaningless skips it and lets the scan
+        # carry on unchanged.
+        decline() {
+          echo "::warning::$*; skipping the database cache for" \
+            "this run"
+          echo "cacheable=false" >> "${GITHUB_OUTPUT}"
+          exit 0
+        }
+        # Ask Grype what it resolved rather than reading the inputs:
+        # the feed and the cache directory can be repointed by the
+        # config input, GRYPE_DB_UPDATE_URL or an auto-detected
+        # .grype.yaml, and only the resolved view accounts for all
+        # three. Tolerated rather than assumed, because `config --load`
+        # postdates releases that grype-version can still pin, and
+        # those scan perfectly well.
+        resolved=$("${GRYPE_CMD}" ${cfg[@]+"${cfg[@]}"} config --load \
+          2>/dev/null) || resolved=""
+        if [ -z "${resolved}" ]; then
+          decline "this Grype build does not report its resolved" \
+            "configuration (grype config --load)"
+        fi
+        # Strips matching outer delimiters and nothing else. Grype
+        # wraps these values in single quotes without escaping what is
+        # inside them - it emits '/tmp/gr'ype/db' verbatim, which is
+        # not valid YAML - so treating '' as an escaped apostrophe
+        # would corrupt a path that genuinely contains two of them.
+        field() {
+          local v
+          v=$(printf '%s\n' "${resolved}" \
+            | sed -n "s/^[[:space:]]*$1:[[:space:]]*//p" | head -n1)
+          case "${v}" in
+            '"'*'"') v="${v#\"}"; v="${v%\"}" ;;
+            "'"*"'") v="${v#\'}"; v="${v%\'}" ;;
+          esac
+          printf '%s' "${v}"
+        }
+        # A caller who disabled auto-update pinned or preloaded a
+        # database deliberately: restoring would overwrite it, and one
+        # already on the runner gains nothing from being cached.
+        if [ "$(field auto-update)" = "false" ]; then
+          decline "db.auto-update is false, so the database is" \
+            "pinned or preloaded"
+        fi
+        dir=$(field cache-dir)
+        if [ -z "${dir}" ]; then
+          decline "the Grype cache directory could not be read"
+        fi
+        dir="${dir/#\~/${HOME}}"
+        # Whatever this names is archived on save and written back
+        # over on restore, so refuse a directory broad enough to sweep
+        # in unrelated files. realpath rather than a lexical tidy-up,
+        # so a symlinked component cannot hide the real destination; it
+        # resolves the components that exist and leaves the rest, which
+        # a cold runner needs and GNU realpath would want -m for.
+        case "${dir}" in
+          /*) ;;
+          *) decline "the Grype cache directory is not an absolute" \
+               "POSIX path (${dir})" ;;
+        esac
+        canonical() {
+          python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"
+        }
+        dir=$(canonical "${dir}")
+        # The root has to be rejected on its own: the containment test
+        # below builds the pattern "${dir}"/*, which for "/" becomes
+        # "//*" and matches nothing.
+        if [ "${dir}" = "/" ]; then
+          decline "the Grype cache directory is the filesystem root"
+        fi
+        # Directories the run shares with everything else on the
+        # machine: refusing these keeps a cache entry from archiving
+        # unrelated files and writing them back on restore. A dedicated
+        # subdirectory of any of them is still fine.
+        for guard in "${HOME:-}" "${GITHUB_WORKSPACE:-}" \
+          "${RUNNER_TEMP:-}" "${TMPDIR:-}" /tmp /var/tmp; do
+          [ -n "${guard}" ] || continue
+          case "$(canonical "${guard}")/" in
+            "${dir}"/*)
+              decline "the Grype cache directory (${dir}) contains a" \
+                "directory the run keeps its own files in" ;;
+          esac
+        done
+        # Always the installed binary, never the grype-version input:
+        # that accepts 'latest', which would pin the prefix to a
+        # literal string while the binary under it moves, so a database
+        # cached under one schema could be restored for a release
+        # unable to read it.
+        version="v$("${GRYPE_CMD}" version \
+          | awk '/^Version:/ {print $2; exit}')"
+        if [ "${version}" = "v" ]; then
+          echo "::error::could not resolve the installed Grype version"
+          exit 1
+        fi
+        # Namespaced by the feed the database will come from. Grype
+        # decides whether to update by comparing build times, so
+        # without this a newer database from another feed survives
+        # `db update` and the scan silently uses it.
+        #
+        # sha256sum is GNU coreutils and absent on macOS, which ships
+        # shasum; checking both adds no dependency.
+        sha256() {
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum
+          else
+            shasum -a 256
+          fi
+        }
+        update_url=$(field update-url)
+        if [ -z "${update_url}" ]; then
+          decline "the Grype database update-url could not be read," \
+            "so entries cannot be namespaced by feed"
+        fi
+        source_id=$(printf '%s' "${update_url}" | sha256 | cut -c1-12)
+        echo "Grype DB cache dir:    ${dir}"
+        echo "Grype DB cache prefix: grype-db-${version}-${source_id}-"
+        {
+          echo "cacheable=true"
+          echo "dir=${dir}"
+          echo "prefix=grype-db-${version}-${source_id}-"
+        } >> "${GITHUB_OUTPUT}"
+    - name: "Restore Grype DB from cache"
+      id: grype-db-restore
+      if: steps.grype-db.outputs.cacheable == 'true'
+      # Prefix restore rather than an exact key: the entry carries the
+      # database build time, which cannot be known until the database
+      # is in hand. `key` is the bare prefix, which never exists as a
+      # complete entry, so the lookup falls through to restore-keys
+      # and returns the most recent build available.
+      # yamllint disable-line rule:line-length
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ steps.grype-db.outputs.dir }}
+        key: ${{ steps.grype-db.outputs.prefix }}
+        restore-keys: ${{ steps.grype-db.outputs.prefix }}
+
+    - name: "Refresh the Grype DB"
+      id: grype-db-refresh
+      if: >-
+        steps.validate.outputs.cache-db == 'true'
+        && steps.grype-db.outputs.cacheable == 'true'
+      shell: bash
+      env:
+        GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
+        PREFIX: ${{ steps.grype-db.outputs.prefix }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        GRYPE_CHECK_FOR_APP_UPDATE: "false"
+      run: |
+        set -euo pipefail
+        cfg=()
+        [ -n "${INPUT_CONFIG}" ] && cfg+=(--config "${INPUT_CONFIG}")
+        build_time() {
+          # The whole value after "Built:", not just the first field.
+          # Newer Grype emits RFC3339, but older releases - which
+          # grype-version can still pin - emit
+          # "2024-07-25 01:30:47 +0000 UTC", where one field is the
+          # date alone and every build that day would collapse onto a
+          # single key. || true because `db status` exits non-zero for
+          # a database Grype rejects, which pipefail would otherwise
+          # turn into an aborted step.
+          "${GRYPE_CMD}" ${cfg[@]+"${cfg[@]}"} db status 2>/dev/null \
+            | sed -n 's/^Built:[[:space:]]*//p' | head -n1 || true
+        }
+        before=$(build_time)
+        # Best-effort. `db update` forces a check, so a transient feed
+        # outage would otherwise fail the action here even though a
+        # perfectly usable database was restored and the scan could
+        # have run against it.
+        if ! "${GRYPE_CMD}" ${cfg[@]+"${cfg[@]}"} db update; then
+          echo "::warning::Grype database update failed; continuing" \
+            "with the database already present"
+        fi
+        after=$(build_time)
+        if [ -z "${after}" ]; then
+          # No database at all: the scan cannot run, so this is fatal
+          # in a way a failed refresh is not.
+          echo "::error::no usable Grype database after update"
+          exit 1
+        fi
+        # Grype prints Built: even for a database it considers invalid
+        # - a checksum mismatch, or one aged past its limit - and
+        # signals that only through the exit status. Reading the
+        # timestamp alone would let a corrupt database be cached under
+        # a perfectly valid-looking key. The step still succeeds: an
+        # invalid database is the scan's problem to report, with a far
+        # better message than this step could produce.
+        if ! "${GRYPE_CMD}" ${cfg[@]+"${cfg[@]}"} db status \
+          >/dev/null 2>&1; then
+          echo "::warning::Grype reports the database as invalid;" \
+            "leaving the cache untouched"
+          echo "save=false" >> "${GITHUB_OUTPUT}"
+          exit 0
+        fi
+        # Reduced to an alphanumeric run so the key stays legible and
+        # safe whichever timestamp format the binary produced; the
+        # value itself is what makes it unique per published build.
+        stamp=$(printf '%s' "${after}" | tr -cd 'A-Za-z0-9')
+        if [ -z "${stamp}" ]; then
+          echo "::error::unusable Grype database build time: ${after}"
+          exit 1
+        fi
+        echo "restored build: ${before:-<none>}"
+        echo "current build:  ${after}"
+        save=true
+        if [ "${before}" = "${after}" ]; then
+          # Nothing new to publish. Either the entry just restored
+          # already holds this build, and re-saving would collide with
+          # it, or nothing was restored and the database was already
+          # on the runner - in which case this run cannot say which
+          # feed produced it, and publishing it under this feed's
+          # prefix could hand a later run another feed's data. See
+          # "Concurrency and the database cache" in the README.
+          echo "No new database build to cache"
+          save=false
+        fi
+        {
+          echo "save=${save}"
+          echo "key=${PREFIX}${stamp}"
+        } >> "${GITHUB_OUTPUT}"
+    - name: "Save the Grype DB to cache"
+      if: >-
+        steps.validate.outputs.cache-db == 'true'
+        && steps.grype-db.outputs.cacheable == 'true'
+        && steps.grype-db-refresh.outputs.save == 'true'
+      # The build time in the key is what makes this work: each
+      # published database gets its own entry, so a save never has to
+      # overwrite an existing one, and the prefix restore above finds
+      # the most recently created of them - the newest build, given
+      # the single writer per source that the README requires.
+      #
+      # Concurrent callers still collide here, because they would be
+      # writing the same new key. That is what 'restore-only' is for -
+      # see "Concurrency and the database cache" in the README.
+      # yamllint disable-line rule:line-length
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      with:
+        path: ${{ steps.grype-db.outputs.dir }}
+        key: ${{ steps.grype-db-refresh.outputs.key }}
 
     - name: "Run Grype"
       id: scan
