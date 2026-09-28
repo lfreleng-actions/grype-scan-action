@@ -52,19 +52,13 @@ jobs:
             ${{ env.CONNECTION_ALLOW_LIST }}
             index.docker.io:443
 
-      - name: "Checkout repository"
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
       # --- a target with known, unfixable findings ----------------
       # alpine:3.10 is long out of support, so it reliably reports
       # high and critical findings, most without a fix. That makes it
       # a stable fixture for both the gating and the only-fixed paths.
       - name: "Scan a vulnerable image (reporting only)"
         id: report_only
-        uses: ./
+        uses: $/
         with:
           target: "registry:alpine:3.10"
           name: "alpine:3.10"
@@ -95,7 +89,7 @@ jobs:
       # --- gating, with the failure permitted ---------------------
       - name: "Scan with gating but permit failure"
         id: permitted
-        uses: ./
+        uses: $/
         with:
           target: "registry:alpine:3.10"
           name: "alpine:3.10 (permitted)"
@@ -125,7 +119,7 @@ jobs:
       # --- only-fixed narrows to actionable findings --------------
       - name: "Scan with only-fixed"
         id: only_fixed
-        uses: ./
+        uses: $/
         with:
           target: "registry:alpine:3.10"
           name: "alpine:3.10 (only-fixed)"
@@ -162,7 +156,7 @@ jobs:
       - name: "Scan that must fail"
         id: must_fail
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           target: "registry:alpine:3.10"
           fail-on: "high"
@@ -182,7 +176,7 @@ jobs:
       - name: "Neither sbom nor target"
         id: no_source
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           fail-on: "high"
 
@@ -197,7 +191,7 @@ jobs:
       - name: "Both sbom and target"
         id: both_sources
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           sbom: "sbom.json"
           target: "registry:alpine:3.10"
@@ -213,7 +207,7 @@ jobs:
       - name: "Invalid fail-on"
         id: bad_threshold
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           target: "registry:alpine:3.10"
           fail-on: "catastrophic"
@@ -229,7 +223,7 @@ jobs:
       - name: "Output formats without json"
         id: no_json
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           target: "registry:alpine:3.10"
           output-formats: "table,sarif"
@@ -246,7 +240,7 @@ jobs:
       - name: "SBOM glob matching nothing"
         id: no_sbom
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           sbom: "does-not-exist-*.json"
           upload-artifact: "false"
@@ -261,7 +255,7 @@ jobs:
 
       - name: "SBOM glob matching nothing, permitted"
         id: no_sbom_ok
-        uses: ./
+        uses: $/
         with:
           sbom: "does-not-exist-*.json"
           fail-on-missing-sbom: "false"
@@ -286,7 +280,7 @@ jobs:
       # the input validation.
       - name: "Scan with cache-db restore-only"
         id: restore-only
-        uses: ./
+        uses: $/
         with:
           target: 'registry:alpine:3.10'
           fail-on: 'none'
@@ -324,7 +318,7 @@ jobs:
           echo "restore-only scanned normally (${TOTAL} matches)"
 
       - name: "Mixed-case cache-db stays accepted"
-        uses: ./
+        uses: $/
         with:
           target: 'registry:alpine:3.10'
           fail-on: 'none'
@@ -339,7 +333,7 @@ jobs:
       - name: "Invalid cache-db"
         id: bad-cache-db
         continue-on-error: true
-        uses: ./
+        uses: $/
         with:
           target: 'registry:alpine:3.10'
           fail-on: 'none'
