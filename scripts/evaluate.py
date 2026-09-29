@@ -6,8 +6,9 @@
 
 Gating is computed here rather than taken from Grype's ``--fail-on``
 exit code, because approved bypasses have to be subtracted from the
-findings first. Deriving both from one source keeps the table, the
-counts and the verdict consistent.
+findings first, and because a run may report findings as warnings
+rather than blocking. Deriving the table, the counts and the verdict
+from one place keeps all three consistent.
 """
 
 from __future__ import annotations
@@ -90,7 +91,7 @@ def build_row(match: dict) -> dict:
 
 
 def collect(settings: Settings, bypasses: dict[str, dict]) -> Report:
-    """Read every report and split findings into gating and bypassed."""
+    """Read every report and sort findings into their buckets."""
     report = Report()
     for path, artefact in load_manifest():
         if not os.path.exists(path):
@@ -125,19 +126,27 @@ def collect(settings: Settings, bypasses: dict[str, dict]) -> Report:
             if bypass:
                 row["bypass"] = bypass
                 section.bypassed.append(row)
-            else:
+            elif settings.gate_active:
                 section.gating.append(row)
+            else:
+                # Meets the threshold, but nothing blocks this run.
+                # The finding still gets reported and annotated; only
+                # the verdict changes.
+                section.advisory.append(row)
 
         report.sections.append(section)
     return report
 
 
-def write_outputs(report: Report) -> None:
+def write_outputs(report: Report, settings: Settings) -> None:
     """Publish the step outputs consumers act on."""
     emit("gating", "true" if report.gating else "false")
     emit("total-matches", str(report.total))
     emit("gating-matches", str(len(report.gating)))
+    emit("advisory-matches", str(len(report.advisory)))
     emit("bypassed-matches", str(len(report.bypassed)))
+    emit("gate-active", "true" if settings.can_gate else "false")
+    emit("gate-reason", settings.gate_reason)
     emit(
         "bypassed-ids",
         ",".join(sorted({str(row["id"]) for row in report.bypassed})),
@@ -151,11 +160,14 @@ def main() -> int:
     settings = Settings.from_env()
     report = collect(settings, load_bypasses())
     write_summary(report, settings)
-    write_outputs(report)
+    write_outputs(report, settings)
     print(
         f"Total {report.total} match(es); {len(report.gating)} gating, "
-        f"{len(report.bypassed)} bypassed (threshold '{settings.fail_on}')"
+        f"{len(report.advisory)} advisory, {len(report.bypassed)} "
+        f"bypassed (threshold '{settings.fail_on}')"
     )
+    if not settings.gate_active:
+        print(f"Findings do not block this run: {settings.gate_reason}")
     return 0
 
 

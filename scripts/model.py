@@ -6,10 +6,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 
 SEVERITY_ORDER = ["negligible", "low", "medium", "high", "critical"]
+
+# Gating modes. 'always' is the historical behaviour and stays the
+# default, so upgrading the action cannot change a consumer's verdict.
+GATE_ALWAYS = "always"
+GATE_ON_CHANGE = "dependencies-changed"
 SEVERITY_ICON = {
     "critical": "🔴",
     "high": "🟠",
@@ -26,6 +32,57 @@ def severity_rank(value: str) -> int:
         return SEVERITY_ORDER.index((value or "").lower())
     except ValueError:
         return -1
+
+
+def read_change_signal(path: str) -> str:
+    """Read the dependency-change sidecar; '' when unusable.
+
+    Every failure mode collapses to '', which the caller treats as
+    unresolved and therefore gating. A sidecar that cannot be read
+    must never be the reason a finding stops blocking.
+    """
+    if not path or not os.path.exists(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        # ValueError covers JSONDecodeError and the UnicodeDecodeError
+        # a non-UTF-8 file raises. A sidecar that cannot be decoded is
+        # no more trustworthy than one that cannot be parsed, and
+        # neither may abort evaluation before the summary is written.
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    changed = data.get("changed")
+    # Only a real boolean counts: a string 'false' from a hand-written
+    # sidecar is ambiguous enough that gating is the safer reading.
+    if isinstance(changed, bool):
+        return "true" if changed else "false"
+    return ""
+
+
+def resolve_gate(gate_when: str, explicit: str, manifest: str) -> tuple[bool, str]:
+    """Decide whether findings can block this run, and say why.
+
+    The explicit input wins over the sidecar so a caller that already
+    knows the answer never has to write a file.
+    """
+    if gate_when != GATE_ON_CHANGE:
+        return True, "every scan gates"
+
+    signal = (explicit or "").strip().lower()
+    if signal not in ("true", "false"):
+        signal = read_change_signal(manifest)
+
+    if signal == "true":
+        return True, "this change touched the dependency chain"
+    if signal == "false":
+        return False, "this change did not touch the dependency chain"
+    # Fail closed. Unlike skipping a scan, where inconclusive detection
+    # can safely mean 'scan anyway', an unresolved signal here would
+    # downgrade real findings to warnings. Keep gating instead.
+    return True, "the dependency-change signal was unavailable"
 
 
 def emit(name: str, value: str) -> None:
@@ -96,6 +153,7 @@ class Section:
     rows: list[dict] = field(default_factory=list)
     gating: list[dict] = field(default_factory=list)
     bypassed: list[dict] = field(default_factory=list)
+    advisory: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -118,6 +176,11 @@ class Report:
         return [row for section in self.sections for row in section.bypassed]
 
     @property
+    def advisory(self) -> list[dict]:
+        """Findings that would block, reported as warnings instead."""
+        return [row for section in self.sections for row in section.advisory]
+
+    @property
     def rows(self) -> list[dict]:
         """Every finding across every artefact."""
         return [row for section in self.sections for row in section.rows]
@@ -136,6 +199,31 @@ class Settings:
     max_rows: int
     bypass_repo: str
     only_fixed: bool
+    gate_active: bool
+    change_reason: str
+
+    @property
+    def can_gate(self) -> bool:
+        """Whether a qualifying finding could block, before permit-fail.
+
+        ``gate_active`` alone answers only the dependency-change
+        question; a threshold of 'none' means nothing gates whatever
+        that signal said. ``permit-fail`` is applied later still, by
+        the verdict step, and is deliberately not modelled here.
+        """
+        return self.gate_active and self.threshold is not None
+
+    @property
+    def gate_reason(self) -> str:
+        """Why findings did or did not block, matching ``can_gate``.
+
+        The threshold answer comes first: with no severity gate
+        configured nothing blocks whatever the change signal said, so
+        reporting the signal there would explain the wrong thing.
+        """
+        if self.threshold is None:
+            return "no severity threshold is configured"
+        return self.change_reason
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -145,6 +233,11 @@ class Settings:
             max_rows = int(os.environ.get("INPUT_SUMMARY_MAX_ROWS", "50"))
         except ValueError:
             max_rows = 50
+        gate_active, change_reason = resolve_gate(
+            os.environ.get("INPUT_GATE_WHEN") or GATE_ALWAYS,
+            os.environ.get("INPUT_DEPENDENCIES_CHANGED") or "",
+            os.environ.get("INPUT_CHANGE_MANIFEST") or "",
+        )
         return cls(
             fail_on=fail_on,
             threshold=severity_rank(fail_on) if fail_on != "none" else None,
@@ -157,4 +250,6 @@ class Settings:
             max_rows=max_rows,
             bypass_repo=os.environ.get("BYPASS_REPO", ""),
             only_fixed=os.environ.get("INPUT_ONLY_FIXED", "false") == "true",
+            gate_active=gate_active,
+            change_reason=change_reason,
         )
