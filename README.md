@@ -80,8 +80,10 @@ change](#gating-only-when-dependencies-change) instead.
 ### 1. Gate on what a bump can fix
 
 `only-fixed: "true"` reports every finding but gates those with a
-fix available. A CVE nobody can action stops blocking merges, while a
-missed dependency bump still fails.
+fix available. A finding that would otherwise gate but has no fix is
+listed as a warning and counted in `advisory-matches`; anything below
+the gating bars stays in the report as before. A CVE nobody can action
+stops blocking merges, while a missed dependency bump still fails.
 
 The action applies this itself rather than passing `--only-fixed` to
 Grype, which would drop unfixable findings from the report altogether.
@@ -207,19 +209,142 @@ SBOM's naming pattern — `sbom-cyclonedx-deps.json` alongside
 `sbom: 'sbom-cyclonedx-*.json'` scans the SBOM and reads the sidecar,
 rather than trying to scan both.
 
-Pair this with `only-fixed: "true"`. When a change *does* touch the
-dependency chain the full gate applies, so without it a maintainer
-bumping one library can find themselves blocked by findings no bump can
-clear — which makes dependency maintenance the most expensive change to
-make, and discourages the work most worth doing. Narrowing the gate
-further, so that declared dependencies block while inherited ones only
-warn, is tracked in
-[#10](https://github.com/lfreleng-actions/grype-scan-action/issues/10).
+Pair this with `dependency-policy: "declared"` below, or failing that
+with `only-fixed: "true"`. When a change *does* touch the dependency
+chain the full gate applies, so without one of them a maintainer
+bumping a single library can find themselves blocked by the project's
+whole accumulated backlog — which makes dependency maintenance the most
+expensive change to make, and discourages the work most worth doing.
 
 This narrows when the gate applies, so it needs a counterweight: run a
 scheduled or default-branch scan with `gate-when: "always"`. Without
 one, findings accumulate with no owner, and the next maintainer to touch
 a dependency inherits the whole backlog at once.
+
+## Gating only what the project declared
+
+`dependency-policy: "declared"` gates findings in packages the project
+asked for, and reports findings in packages it merely inherited.
+
+A project can act on a dependency it declared: bump it, pin it, replace
+it. A package pulled in three levels down by something else offers no
+such route, and blocking a merge on it asks a team to fix something
+they do not control.
+
+<!-- markdownlint-disable MD046 -->
+
+```yaml
+- uses: lfreleng-actions/grype-scan-action@<sha>
+  with:
+    sbom: 'sbom-cyclonedx.json'
+    dependency-policy: 'declared'
+    transitive-fail-on: 'critical'
+```
+
+<!-- markdownlint-enable MD046 -->
+
+`transitive-fail-on` sets the severity at which an inherited package
+gates — an independent bar rather than a filter layered on `fail-on`,
+and either may be the lower of the two. Declared packages answer to
+`fail-on`; an inherited one gates when it reaches `transitive-fail-on`,
+is reported as a warning when it reaches `fail-on` but not that, and
+is reported without a warning when it reaches neither.
+
+It defaults to `none`, meaning an inherited package never gates.
+`critical` is the more defensible setting for most projects, since a
+critical in a transitive package is still worth stopping for.
+
+### Where the answer comes from
+
+CycloneDX records the dependency graph, and Grype preserves each
+component's `bom-ref` as `artifact.id` — so the graph arrives inside
+the SBOM this action already scans. No checkout, no extra job wiring.
+
+Three document shapes classify, all measured against real generators:
+
+<!-- markdownlint-disable MD013 -->
+
+| Shape        | Producer                           | Anchor                                            |
+| ------------ | ---------------------------------- | ------------------------------------------------- |
+| Single root  | `cyclonedx-py --pyproject`         | `metadata.component` and its `dependsOn`          |
+| Reactor      | `cyclonedx-maven makeAggregateBom` | the unscoped module components                    |
+| Gradle build | `cyclonedx-gradle-plugin` 2.2.0+   | components marked with a `project_path` qualifier |
+
+<!-- markdownlint-enable MD013 -->
+
+Every rule reads conventions rather than guarantees, so each is
+restricted to a document that names one of those generators in
+`metadata.tools`. CycloneDX does not say whether a first-level
+dependency is a third-party package or a module of the project, and it
+leaves `scope` optional throughout — read either signal from an
+unmeasured producer and a declared package can be mistaken for an
+inherited one, which is the direction that loses the gate. Adding a
+generator means measuring its output first; Gradle shows why that is
+not a formality, since its shape fits neither of the other rules.
+
+The reactor case needs the extra care. The aggregator names itself in
+`metadata.component` but depends on nothing, and a module that a
+sibling module depends on looks exactly like a third-party library.
+`scope` separates them: cyclonedx-maven marks third-party components
+`required` and leaves modules unscoped. The rule also requires the
+named root to be part of the graph, which Syft's never is — it names
+the scanned directory rather than the project.
+
+Gradle fits neither. `cyclonedx-gradle-plugin` leaves the root project
+out of the graph and sets no scope on anything, so the reactor rule
+would refuse it and the single-root rule would read every subproject as
+a third-party library — making what each one declares look inherited.
+It does mark every project in the build with a `project_path` purl
+qualifier, taken from Gradle's own `ProjectComponentIdentifier`, which
+an external module structurally cannot carry. The rule engages only
+when the root carries that marker, which plugins before 2.2.0 never
+emit, so an older document is refused rather than misread. The rule is exclusive
+too: another rule never sees a Gradle document that fails this one.
+
+The graph is read from **CycloneDX JSON only**, at schema versions
+1.4, 1.5 and 1.6, which is where every supported producer was measured
+to classify identically. An XML SBOM carries the same graph but needs a
+separate parser, so it resolves to no classifier and every finding
+stays declared. Where `sbom_format` is `xml`, request `both` to get the
+benefit.
+
+Where the graph cannot answer — Syft emits none at all for Go, and
+`cyclonedx-py` leaves a lock-file project's graph unrooted — supply the
+answer directly with `declared-dependencies`, a list of purls or names,
+one per line. That list must be complete: a package missing from it
+counts as inherited. A purl and a name are different identifiers,
+though, and absence in one form proves nothing about the other, so a
+finding counts as inherited only when it can be checked against every
+form the list uses. List purls wherever the findings carry them. An
+empty file counts as *no* list rather than as
+"this project declares nothing" — otherwise a producer that truncated
+it could mark every package inherited and quietly disable the gate.
+Like the change sidecar, the list stays out of the `sbom` glob, so it
+may safely sit beside the SBOM.
+
+`declared-source` chooses between them. `auto` uses the list when one
+is configured, and falls back to the graph only when none is. A list
+that is configured but missing, unreadable or empty does **not** fall
+back: it leaves every finding declared, since a broken configuration
+is not something a usable graph should quietly paper over.
+
+Classification runs whatever `dependency-policy` is set to, so
+`direct-matches`, `transitive-matches` and `provenance-source` report
+accurately on a project still using `all` — which is how to see what
+switching to `declared` would change before switching.
+
+### What happens when it cannot tell
+
+Everything unclassifiable counts as **declared**, and so gates.
+An SBOM with no graph, an unrooted graph, a root outside the graph, an
+unreadable file, a finding matching no component — each one keeps the
+finding blocking.
+
+That is the whole safety argument for this feature: a lane whose SBOM
+carries no usable graph loses the *leniency*, never the *gate*, and
+behaves exactly as it did before. `provenance-source` reports which
+classifier answered for each scanned artefact, so a lane silently
+getting no benefit is visible rather than mysterious.
 
 ## Failing closed
 
@@ -239,6 +364,9 @@ exactly `true` or `false`, leaves the signal unresolved — and an
 unresolved signal gates. Downgrading a real finding to a warning is a
 decision that has to be positively established, never inferred from a
 missing file.
+
+Dependency provenance follows the same rule: anything that cannot be
+classified counts as declared, and gates.
 
 ## Inputs
 
@@ -263,23 +391,23 @@ Provide one of `sbom` or `target`, not both.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name             | Default | Description                                                |
-| ---------------- | ------- | ---------------------------------------------------------- |
-| fail-on          | medium  | Lowest gating severity, or `none` to report without gating |
-| only-fixed       | false   | Report vulnerabilities that have a fix                     |
-| ignore-states    | ""      | Fix states to ignore: fixed, not-fixed, unknown, wont-fix  |
-| by-cve           | false   | Orient results by CVE rather than the original ID          |
-| sort-by          | risk    | risk, severity, epss, kev, package or vulnerability        |
-| scope            | ""      | Layers to analyse for image targets                        |
-| platform         | ""      | Platform specifier for image targets                       |
-| distro           | ""      | Distro to match against                                    |
-| exclude          | ""      | Comma-separated globs to exclude                           |
-| add-cpes-if-none | false   | Generate CPEs for packages that have none                  |
-| vex              | ""      | Comma-separated VEX documents to apply                     |
-| config           | ""      | Grype configuration file                                   |
-| extra-args       | ""      | Raw arguments appended to the Grype call                   |
-| grype-version    | ""      | Grype version to install                                   |
-| cache-db         | true    | Database cache mode: `true`, `false` or `restore-only`     |
+| Name             | Default | Description                                                        |
+| ---------------- | ------- | ------------------------------------------------------------------ |
+| fail-on          | medium  | Lowest gating severity, or `none` to report without gating         |
+| only-fixed       | false   | Gate only on fixable findings; unfixable ones that would gate warn |
+| ignore-states    | ""      | Fix states to ignore: fixed, not-fixed, unknown, wont-fix          |
+| by-cve           | false   | Orient results by CVE rather than the original ID                  |
+| sort-by          | risk    | risk, severity, epss, kev, package or vulnerability                |
+| scope            | ""      | Layers to analyse for image targets                                |
+| platform         | ""      | Platform specifier for image targets                               |
+| distro           | ""      | Distro to match against                                            |
+| exclude          | ""      | Comma-separated globs to exclude                                   |
+| add-cpes-if-none | false   | Generate CPEs for packages that have none                          |
+| vex              | ""      | Comma-separated VEX documents to apply                             |
+| config           | ""      | Grype configuration file                                           |
+| extra-args       | ""      | Raw arguments appended to the Grype call                           |
+| grype-version    | ""      | Grype version to install                                           |
+| cache-db         | true    | Database cache mode: `true`, `false` or `restore-only`             |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -305,18 +433,22 @@ Provide one of `sbom` or `target`, not both.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                       | Default    | Description                                                   |
-| -------------------------- | ---------- | ------------------------------------------------------------- |
-| gate-when                  | always     | `always`, or `dependencies-changed` to warn on unrelated runs |
-| dependencies-changed       | ""         | `true`, `false`, or empty to read the sidecar                 |
-| dependency-change-manifest | ""         | Path to a `{"changed": bool}` sidecar beside the SBOM         |
-| permit-fail                | false      | Report findings and pass the step                             |
-| bypass-enabled             | true       | Honour maintainer-approved bypass issues                      |
-| bypass-repository          | ""         | Repository holding bypass issues; empty uses the caller       |
-| bypass-label               | cve-bypass | Label that makes a bypass effective                           |
-| bypass-title-prefix        | BYPASS:    | Issue title prefix identifying a bypass                       |
-| bypass-max-age-days        | 90         | Ignore bypass issues older than this; 0 disables expiry       |
-| github-token               | ""         | Token for reading bypass issues                               |
+| Name                       | Default    | Description                                                            |
+| -------------------------- | ---------- | ---------------------------------------------------------------------- |
+| gate-when                  | always     | `always`, or `dependencies-changed` to warn on unrelated runs          |
+| dependencies-changed       | ""         | `true`, `false`, or empty to read the sidecar                          |
+| dependency-change-manifest | ""         | Path to a `{"changed": bool}` sidecar beside the SBOM                  |
+| dependency-policy          | all        | `all`, or `declared` to warn on inherited packages                     |
+| transitive-fail-on         | none       | Severity at which an inherited package gates, independent of `fail-on` |
+| declared-source            | auto       | `auto`, `sbom-graph`, `file` or `none`                                 |
+| declared-dependencies      | ""         | Path to a list of declared purls or names, one per line                |
+| permit-fail                | false      | Report findings and pass the step                                      |
+| bypass-enabled             | true       | Honour maintainer-approved bypass issues                               |
+| bypass-repository          | ""         | Repository holding bypass issues; empty uses the caller                |
+| bypass-label               | cve-bypass | Label that makes a bypass effective                                    |
+| bypass-title-prefix        | BYPASS:    | Issue title prefix identifying a bypass                                |
+| bypass-max-age-days        | 90         | Ignore bypass issues older than this; 0 disables expiry                |
+| github-token               | ""         | Token for reading bypass issues                                        |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -515,18 +647,21 @@ cost of a download per run.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name             | Description                                              |
-| ---------------- | -------------------------------------------------------- |
-| gating           | "true" when findings gate the workflow                   |
-| total-matches    | Total matches across all scanned artefacts               |
-| gating-matches   | Matches in the gating bucket; 0 when the gate is unarmed |
-| advisory-matches | Matches reported as warnings rather than blocking        |
-| gate-active      | "true" when findings could block, before permit-fail     |
-| gate-reason      | Why the gate is or is not armed; policy, not outcome     |
-| bypassed-matches | Matches suppressed by an approved bypass                 |
-| bypassed-ids     | Comma-separated vulnerability IDs bypassed               |
-| severity-counts  | JSON object of counts by severity                        |
-| report-files     | Newline-separated list of report files written           |
+| Name               | Description                                                |
+| ------------------ | ---------------------------------------------------------- |
+| gating             | "true" when findings gate the workflow                     |
+| total-matches      | Total matches across all scanned artefacts                 |
+| gating-matches     | Matches in the gating bucket; 0 when the gate is unarmed   |
+| advisory-matches   | Matches reported as warnings rather than blocking          |
+| direct-matches     | Matches in packages the project declares                   |
+| transitive-matches | Matches in packages the project inherited                  |
+| provenance-source  | JSON map of artefact to classifier: sbom-graph, file, none |
+| gate-active        | "true" when findings could block, before permit-fail       |
+| gate-reason        | Why the gate is or is not armed; policy, not outcome       |
+| bypassed-matches   | Matches suppressed by an approved bypass                   |
+| bypassed-ids       | Comma-separated vulnerability IDs bypassed                 |
+| severity-counts    | JSON object of counts by severity                          |
+| report-files       | Newline-separated list of report files written             |
 
 <!-- markdownlint-enable MD013 -->
 
