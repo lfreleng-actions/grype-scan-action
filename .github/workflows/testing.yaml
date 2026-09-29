@@ -220,6 +220,40 @@ jobs:
           echo "Error: invalid fail-on was accepted ❌"
           exit 1
 
+      - name: "Invalid gate-when"
+        id: bad_gate_when
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          gate-when: "sometimes"
+
+      - name: "Error if invalid gate-when did NOT fail"
+        if: steps.bad_gate_when.outcome == 'success'
+        shell: bash
+        run: |
+          # A typo must not silently select a different gating policy
+          echo "Error: invalid gate-when was accepted ❌"
+          exit 1
+
+      - name: "Invalid dependencies-changed"
+        id: bad_deps_changed
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          gate-when: "dependencies-changed"
+          dependencies-changed: "yes"
+
+      - name: "Error if invalid dependencies-changed did NOT fail"
+        if: steps.bad_deps_changed.outcome == 'success'
+        shell: bash
+        run: |
+          # 'yes' would otherwise read as an unresolved signal, which
+          # gates: safe, but the caller never learns it had no effect
+          echo "Error: invalid dependencies-changed was accepted ❌"
+          exit 1
+
       - name: "Output formats without json"
         id: no_json
         continue-on-error: true
@@ -273,6 +307,161 @@ jobs:
             exit 1
           fi
           echo "Missing SBOM permitted when opted in ✅"
+
+      # --- change-scoped gating -----------------------------------
+      # The sidecar deliberately matches the SBOM glob. A caller that
+      # names it consistently with the SBOM must not end up handing it
+      # to Grype as a scan target.
+      - name: "Write an SBOM and a colliding sidecar"
+        shell: bash
+        run: |
+          # lodash 4.17.4 reports reliably at high and critical
+          set -euo pipefail
+          cat > sbom-cyclonedx-app.json <<'JSON'
+          {"bomFormat": "CycloneDX", "specVersion": "1.5",
+           "version": 1,
+           "components": [
+             {"bom-ref": "lodash-1", "type": "library",
+              "name": "lodash", "version": "4.17.4",
+              "purl": "pkg:npm/lodash@4.17.4"}
+           ]}
+          JSON
+          printf '{"changed": false}\n' > sbom-cyclonedx-deps.json
+
+      - name: "Scan with the gate withheld"
+        id: gate_withheld
+        uses: $/
+        with:
+          sbom: "sbom-cyclonedx-*.json"
+          fail-on: "high"
+          gate-when: "dependencies-changed"
+          dependency-change-manifest: "sbom-cyclonedx-deps.json"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate the sidecar is excluded and the gate withheld"
+        shell: bash
+        env:
+          GATING: ${{ steps.gate_withheld.outputs.gating }}
+          ADVISORY: ${{ steps.gate_withheld.outputs.advisory-matches }}
+          ACTIVE: ${{ steps.gate_withheld.outputs.gate-active }}
+          REASON: ${{ steps.gate_withheld.outputs.gate-reason }}
+        run: |
+          # Handing Grype the sidecar would have failed the step
+          set -euo pipefail
+          echo "gating=${GATING} advisory=${ADVISORY} active=${ACTIVE}"
+          echo "reason=${REASON}"
+          if [ "${GATING}" != "false" ]; then
+            echo "Expected no gating with dependencies unchanged ❌"
+            exit 1
+          fi
+          if [ "${ADVISORY}" -lt 1 ]; then
+            echo "Expected findings reported as advisories ❌"
+            exit 1
+          fi
+          if [ "${ACTIVE}" != "false" ]; then
+            echo "Expected the gate to report itself inactive ❌"
+            exit 1
+          fi
+          echo "Sidecar excluded and gate withheld ✅"
+
+      - name: "Scan with the dependency chain touched"
+        id: gate_applied
+        continue-on-error: true
+        uses: $/
+        with:
+          sbom: "sbom-cyclonedx-app.json"
+          fail-on: "high"
+          gate-when: "dependencies-changed"
+          dependencies-changed: "true"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate a touched dependency chain gates"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.gate_applied.outcome }}
+          GATING: ${{ steps.gate_applied.outputs.gating }}
+          MATCHES: ${{ steps.gate_applied.outputs.gating-matches }}
+          ADVISORY: ${{ steps.gate_applied.outputs.advisory-matches }}
+          ACTIVE: ${{ steps.gate_applied.outputs.gate-active }}
+        run: |
+          # The step must fail BECAUSE findings gated. Asserting the
+          # outcome alone would also pass if input validation had
+          # rejected the configuration before Grype ever ran.
+          set -euo pipefail
+          for value in "${GATING}" "${MATCHES}" "${ADVISORY}" \
+            "${ACTIVE}"; do
+            if [ -z "${value}" ]; then
+              echo "Expected the action to publish its outputs ❌"
+              exit 1
+            fi
+          done
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "Expected the gate to fail the step ❌"
+            exit 1
+          fi
+          if [ "${GATING}" != "true" ] || [ "${ACTIVE}" != "true" ]; then
+            echo "Expected an active gate with gating findings ❌"
+            exit 1
+          fi
+          if [ "${MATCHES}" -lt 1 ] || [ "${ADVISORY}" != "0" ]; then
+            echo "Expected findings to gate rather than warn ❌"
+            exit 1
+          fi
+          echo "Touching dependencies restored the gate ✅"
+
+      - name: "Scan with an unresolvable change signal"
+        id: gate_unresolved
+        continue-on-error: true
+        uses: $/
+        with:
+          sbom: "sbom-cyclonedx-app.json"
+          fail-on: "high"
+          gate-when: "dependencies-changed"
+          dependency-change-manifest: "no-such-sidecar.json"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate an unresolved signal fails closed"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.gate_unresolved.outcome }}
+          GATING: ${{ steps.gate_unresolved.outputs.gating }}
+          ADVISORY: ${{ steps.gate_unresolved.outputs.advisory-matches }}
+          ACTIVE: ${{ steps.gate_unresolved.outputs.gate-active }}
+          REASON: ${{ steps.gate_unresolved.outputs.gate-reason }}
+        run: |
+          # Prove the gate closed because the signal was unresolved,
+          # not because the run failed somewhere earlier
+          set -euo pipefail
+          for value in "${GATING}" "${ADVISORY}" "${ACTIVE}" \
+            "${REASON}"; do
+            if [ -z "${value}" ]; then
+              echo "Expected the action to publish its outputs ❌"
+              exit 1
+            fi
+          done
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "Expected an unresolved signal to fail the step ❌"
+            exit 1
+          fi
+          if [ "${GATING}" != "true" ] || [ "${ACTIVE}" != "true" ]; then
+            echo "Expected the gate to stay closed ❌"
+            exit 1
+          fi
+          if [ "${ADVISORY}" != "0" ]; then
+            echo "Expected no findings downgraded to warnings ❌"
+            exit 1
+          fi
+          case "${REASON}" in
+            *"signal was unavailable"*) ;;
+            *)
+              echo "Expected the unresolved-signal reason, got" \
+                "'${REASON}' ❌"
+              exit 1 ;;
+          esac
+          echo "Unresolved change signal failed closed ✅"
 
   ### Unit tests for the report evaluation ###
       # The cache is unavailable to a plain `act`-style run but present

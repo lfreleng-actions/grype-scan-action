@@ -64,6 +64,31 @@ inputs:
       request until upstream ships a patch.
     required: false
     default: "false"
+  gate-when:
+    description: >
+      When findings block the run. 'always' gates on every scan, the
+      historical behaviour. 'dependencies-changed' gates only when the
+      change under review touched the dependency chain, and otherwise
+      reports findings as warnings so a CVE published upstream cannot
+      suddenly block unrelated work. The scan itself always runs.
+    required: false
+    default: "always"
+  dependencies-changed:
+    description: >
+      Whether the change under review touched the dependency chain:
+      'true', 'false', or empty to read dependency-change-manifest.
+      Only consulted when gate-when is 'dependencies-changed'.
+    required: false
+    default: ""
+  dependency-change-manifest:
+    description: >
+      Path to a JSON sidecar of the form {"changed": true} written
+      beside the SBOM, read when dependencies-changed is empty. A
+      missing, unreadable or malformed file leaves the signal
+      unresolved, which gates. The file is excluded from the sbom
+      glob, so it may safely share the SBOM's naming pattern.
+    required: false
+    default: ""
   ignore-states:
     description: >
       Comma-separated fix states to ignore, from: fixed, not-fixed,
@@ -257,8 +282,29 @@ outputs:
     description: "Total matches reported across all scanned artefacts"
     value: ${{ steps.evaluate.outputs.total-matches }}
   gating-matches:
-    description: "Matches at or above the threshold, after bypasses"
+    description: >
+      Matches in the gating bucket: at or above the threshold, not
+      suppressed by a bypass, not narrowed away by only-fixed, and not
+      diverted to advisory. Zero whenever the gate is not armed, so
+      this is not the count of matches above the threshold.
     value: ${{ steps.evaluate.outputs.gating-matches }}
+  advisory-matches:
+    description: "Matches reported as warnings rather than blocking"
+    value: ${{ steps.evaluate.outputs.advisory-matches }}
+  gate-active:
+    description: >
+      'true' when a qualifying finding could block this run. False
+      whenever the dependency-change signal withheld the gate or
+      fail-on is 'none'. permit-fail is applied after evaluation and
+      is not reflected here.
+    value: ${{ steps.evaluate.outputs.gate-active }}
+  gate-reason:
+    description: >
+      Why the gate is or is not armed, covering the severity threshold
+      and the dependency-change policy. This reports the policy, not
+      the outcome: gating, gating-matches, advisory-matches and
+      bypassed-matches describe what the run actually did.
+    value: ${{ steps.evaluate.outputs.gate-reason }}
   bypassed-matches:
     description: "Matches suppressed by an approved bypass"
     value: ${{ steps.evaluate.outputs.bypassed-matches }}
@@ -282,6 +328,8 @@ runs:
         INPUT_SBOM: ${{ inputs.sbom }}
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_GATE_WHEN: ${{ inputs.gate-when }}
+        INPUT_DEPENDENCIES_CHANGED: ${{ inputs.dependencies-changed }}
         INPUT_SORT_BY: ${{ inputs.sort-by }}
         INPUT_FORMATS: ${{ inputs.output-formats }}
         INPUT_PREFIX: ${{ inputs.output-prefix }}
@@ -319,6 +367,28 @@ runs:
           *)
             echo "::error::sort-by must be one of package, severity," \
               "epss, risk, kev, vulnerability; got '${INPUT_SORT_BY}'"
+            exit 1
+            ;;
+        esac
+
+        case "${INPUT_GATE_WHEN}" in
+          always|dependencies-changed) ;;
+          *)
+            echo "::error::gate-when must be 'always' or" \
+              "'dependencies-changed'; got '${INPUT_GATE_WHEN}'"
+            exit 1
+            ;;
+        esac
+
+        # Rejected rather than coerced: a typo would read as an
+        # unresolved signal, which gates. The run would stay safe, but
+        # the caller would never learn their setting had no effect.
+        case "${INPUT_DEPENDENCIES_CHANGED}" in
+          true|false|'') ;;
+          *)
+            echo "::error::dependencies-changed must be 'true'," \
+              "'false' or empty; got" \
+              "'${INPUT_DEPENDENCIES_CHANGED}'"
             exit 1
             ;;
         esac
@@ -724,6 +794,7 @@ runs:
         INPUT_SBOM: ${{ inputs.sbom }}
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_FAIL_ON_MISSING: ${{ inputs.fail-on-missing-sbom }}
+        INPUT_CHANGE_MANIFEST: ${{ inputs.dependency-change-manifest }}
         INPUT_PREFIX: ${{ inputs.output-prefix }}
         INPUT_FORMATS: ${{ inputs.output-formats }}
         INPUT_ONLY_FIXED: ${{ inputs.only-fixed }}
@@ -796,7 +867,25 @@ runs:
             compgen -G "${INPUT_SBOM}" || true
           )
           shopt -u nullglob
-          if [ "${#matches[@]}" -eq 0 ]; then
+          # The dependency-change sidecar legitimately sits beside the
+          # SBOM and can match the same glob, which would make Grype
+          # try to scan it and fail the step before evaluation ever
+          # runs. Drop it here rather than leaving callers to pick a
+          # name that happens not to collide. -ef compares the files
+          # themselves, so a relative glob match and an absolute
+          # manifest path still resolve to the same file.
+          declare -a scannable=()
+          for match in "${matches[@]}"; do
+            if [ -n "${INPUT_CHANGE_MANIFEST}" ] &&
+              [ -e "${INPUT_CHANGE_MANIFEST}" ] &&
+              [ "${match}" -ef "${INPUT_CHANGE_MANIFEST}" ]; then
+              echo "Excluding the dependency-change sidecar from the" \
+                "scan: ${match}"
+              continue
+            fi
+            scannable+=("${match}")
+          done
+          if [ "${#scannable[@]}" -eq 0 ]; then
             echo "no-artefacts=true" >> "$GITHUB_OUTPUT"
             if [ "${INPUT_FAIL_ON_MISSING}" = "true" ]; then
               # Fail closed: scanning nothing is indistinguishable
@@ -810,7 +899,7 @@ runs:
             echo "::warning::No SBOM matched '${INPUT_SBOM}'"
             exit 0
           fi
-          for match in "${matches[@]}"; do
+          for match in "${scannable[@]}"; do
             artefacts+=("sbom:${match}")
           done
         fi
@@ -933,6 +1022,9 @@ runs:
         INPUT_SUMMARY_MAX_ROWS: ${{ inputs.summary-max-rows }}
         INPUT_SUMMARY_ON_SUCCESS: ${{ inputs.summary-on-success }}
         INPUT_ONLY_FIXED: ${{ inputs.only-fixed }}
+        INPUT_GATE_WHEN: ${{ inputs.gate-when }}
+        INPUT_DEPENDENCIES_CHANGED: ${{ inputs.dependencies-changed }}
+        INPUT_CHANGE_MANIFEST: ${{ inputs.dependency-change-manifest }}
         BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
       run: |
         # Turn the JSON report(s) into a table, counts and a verdict.
@@ -956,6 +1048,8 @@ runs:
       env:
         GATING: ${{ steps.evaluate.outputs.gating }}
         GATING_MATCHES: ${{ steps.evaluate.outputs.gating-matches }}
+        ADVISORY: ${{ steps.evaluate.outputs.advisory-matches || '0' }}
+        GATE_REASON: ${{ steps.evaluate.outputs.gate-reason }}
         BYPASSED: ${{ steps.evaluate.outputs.bypassed-matches }}
         PERMIT_FAIL: ${{ inputs.permit-fail }}
         FAIL_ON: ${{ inputs.fail-on }}
@@ -970,6 +1064,16 @@ runs:
         fi
 
         if [ "${GATING}" != "true" ]; then
+          if [ "${ADVISORY}" != "0" ]; then
+            # Annotate rather than stay silent: the findings are real,
+            # and the only reason they are not blocking is that this
+            # change cannot have caused them.
+            echo "::warning::${ADVISORY} finding(s) at or above" \
+              "'${FAIL_ON}' reported as warnings because" \
+              "${GATE_REASON}. See the job summary for the affected" \
+              "packages and CVEs."
+            exit 0
+          fi
           echo "No findings at or above '${FAIL_ON}' ✅"
           exit 0
         fi

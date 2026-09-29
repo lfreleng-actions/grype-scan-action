@@ -41,6 +41,13 @@ def render_counts(report: Report, settings: Settings) -> list[str]:
             f"**{len(report.gating)} finding(s) at or above "
             f"`{settings.fail_on}` block this run.**"
         )
+    elif report.advisory:
+        lines.append(
+            f"**{len(report.advisory)} finding(s) at or above "
+            f"`{settings.fail_on}` reported as warnings.** "
+            f"They do not block this run because "
+            f"{settings.gate_reason}."
+        )
     else:
         lines.append(f"No findings at or above `{settings.fail_on}`. ✅")
     return lines
@@ -136,6 +143,10 @@ def render_summary(report: Report, settings: Settings) -> str:
             lines.extend([f"### {section.artefact}", ""])
         if section.gating:
             lines.extend(render_findings_table(section.gating, settings.max_rows))
+        elif section.advisory:
+            lines.append("_Reported as warnings; not blocking this run:_")
+            lines.append("")
+            lines.extend(render_findings_table(section.advisory, settings.max_rows))
         else:
             # Nothing gates, but the findings still belong on the run
             # page: reporting-only scans and sub-threshold results are
@@ -145,6 +156,16 @@ def render_summary(report: Report, settings: Settings) -> str:
             lines.extend(render_findings_table(section.rows, settings.max_rows))
         if section.bypassed:
             lines.extend(render_bypassed(section.bypassed))
+
+    if report.advisory:
+        lines.extend(
+            [
+                "A change that touches the dependency chain will gate "
+                "on these findings, so they are worth clearing before "
+                "the next dependency update rather than after it.",
+                "",
+            ]
+        )
 
     if report.gating:
         lines.extend(
@@ -164,7 +185,7 @@ def write_summary(report: Report, settings: Settings) -> None:
     path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not settings.want_summary or not path:
         return
-    interesting = report.gating or report.bypassed
+    interesting = report.gating or report.advisory or report.bypassed
     if not interesting and not settings.summary_on_success:
         return
     with open(path, "a", encoding="utf-8") as handle:

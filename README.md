@@ -73,7 +73,9 @@ Scan an image or directory directly:
 
 A published advisory with no available fix can block every pull request
 in a repository until upstream ships a patch. There are three ways out,
-in order of preference.
+in order of preference. Where the problem is the timing rather than any
+individual finding, see [gating only when dependencies
+change](#gating-only-when-dependencies-change) instead.
 
 ### 1. Gate on what a bump can fix
 
@@ -158,6 +160,67 @@ permit-fail: ${{ vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
 A composite action cannot read the `vars` context itself, so the caller
 passes the value.
 
+## Gating only when dependencies change
+
+The three escape hatches above act on individual findings. This acts on
+the run: `gate-when: "dependencies-changed"` reports findings as
+warnings unless the change under review touched the dependency chain.
+
+The reasoning is that a CVE published upstream today has nothing to do
+with the change under review, and most changes never touch a dependency
+at all. Blocking them makes the gate a tax on unrelated work rather than
+a control on the thing that introduced the risk. When a maintainer does
+visit the dependencies, the gate applies in full — which is the point at
+which they can act on it.
+
+<!-- markdownlint-disable MD046 -->
+
+```yaml
+- uses: lfreleng-actions/grype-scan-action@<sha>
+  with:
+    sbom: 'sbom-cyclonedx.json'
+    gate-when: 'dependencies-changed'
+    dependencies-changed: ${{ needs.sbom.outputs.deps_changed }}
+```
+
+<!-- markdownlint-enable MD046 -->
+
+**The scan always runs.** Findings are always reported, annotated and
+uploaded; only the verdict changes. This is deliberately not the same as
+skipping the job, which would stop surfacing new advisories altogether.
+
+Where the caller cannot pass the signal directly — a matrix job, say,
+where job outputs collapse to a single value — write a sidecar beside
+the SBOM instead and point `dependency-change-manifest` at it:
+
+<!-- markdownlint-disable MD046 -->
+
+```json
+{ "changed": true }
+```
+
+<!-- markdownlint-enable MD046 -->
+
+The explicit input wins when both are present. The manifest is excluded
+from the `sbom` glob before scanning, so a sidecar may safely share the
+SBOM's naming pattern — `sbom-cyclonedx-deps.json` alongside
+`sbom: 'sbom-cyclonedx-*.json'` scans the SBOM and reads the sidecar,
+rather than trying to scan both.
+
+Pair this with `only-fixed: "true"`. When a change *does* touch the
+dependency chain the full gate applies, so without it a maintainer
+bumping one library can find themselves blocked by findings no bump can
+clear — which makes dependency maintenance the most expensive change to
+make, and discourages the work most worth doing. Narrowing the gate
+further, so that declared dependencies block while inherited ones only
+warn, is tracked in
+[#10](https://github.com/lfreleng-actions/grype-scan-action/issues/10).
+
+This narrows when the gate applies, so it needs a counterweight: run a
+scheduled or default-branch scan with `gate-when: "always"`. Without
+one, findings accumulate with no owner, and the next maintainer to touch
+a dependency inherits the whole backlog at once.
+
 ## Failing closed
 
 A pattern matching no SBOM fails the step by default. Scanning nothing
@@ -169,6 +232,13 @@ absent SBOM is a valid outcome, such as a build permitted to fail.
 The same principle governs the bypass lookup: an API error applies no
 bypasses rather than assuming approval, and so does an issue whose
 approved title cannot be reconstructed.
+
+The dependency-change signal fails closed too, and for the same reason.
+An absent, unreadable or malformed sidecar, or a value that is not
+exactly `true` or `false`, leaves the signal unresolved — and an
+unresolved signal gates. Downgrading a real finding to a warning is a
+decision that has to be positively established, never inferred from a
+missing file.
 
 ## Inputs
 
@@ -235,15 +305,18 @@ Provide one of `sbom` or `target`, not both.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                | Default    | Description                                             |
-| ------------------- | ---------- | ------------------------------------------------------- |
-| permit-fail         | false      | Report findings and pass the step                       |
-| bypass-enabled      | true       | Honour maintainer-approved bypass issues                |
-| bypass-repository   | ""         | Repository holding bypass issues; empty uses the caller |
-| bypass-label        | cve-bypass | Label that makes a bypass effective                     |
-| bypass-title-prefix | BYPASS:    | Issue title prefix identifying a bypass                 |
-| bypass-max-age-days | 90         | Ignore bypass issues older than this; 0 disables expiry |
-| github-token        | ""         | Token for reading bypass issues                         |
+| Name                       | Default    | Description                                                   |
+| -------------------------- | ---------- | ------------------------------------------------------------- |
+| gate-when                  | always     | `always`, or `dependencies-changed` to warn on unrelated runs |
+| dependencies-changed       | ""         | `true`, `false`, or empty to read the sidecar                 |
+| dependency-change-manifest | ""         | Path to a `{"changed": bool}` sidecar beside the SBOM         |
+| permit-fail                | false      | Report findings and pass the step                             |
+| bypass-enabled             | true       | Honour maintainer-approved bypass issues                      |
+| bypass-repository          | ""         | Repository holding bypass issues; empty uses the caller       |
+| bypass-label               | cve-bypass | Label that makes a bypass effective                           |
+| bypass-title-prefix        | BYPASS:    | Issue title prefix identifying a bypass                       |
+| bypass-max-age-days        | 90         | Ignore bypass issues older than this; 0 disables expiry       |
+| github-token               | ""         | Token for reading bypass issues                               |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -442,15 +515,18 @@ cost of a download per run.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name             | Description                                       |
-| ---------------- | ------------------------------------------------- |
-| gating           | "true" when findings gate the workflow            |
-| total-matches    | Total matches across all scanned artefacts        |
-| gating-matches   | Matches at or above the threshold, after bypasses |
-| bypassed-matches | Matches suppressed by an approved bypass          |
-| bypassed-ids     | Comma-separated vulnerability IDs bypassed        |
-| severity-counts  | JSON object of counts by severity                 |
-| report-files     | Newline-separated list of report files written    |
+| Name             | Description                                              |
+| ---------------- | -------------------------------------------------------- |
+| gating           | "true" when findings gate the workflow                   |
+| total-matches    | Total matches across all scanned artefacts               |
+| gating-matches   | Matches in the gating bucket; 0 when the gate is unarmed |
+| advisory-matches | Matches reported as warnings rather than blocking        |
+| gate-active      | "true" when findings could block, before permit-fail     |
+| gate-reason      | Why the gate is or is not armed; policy, not outcome     |
+| bypassed-matches | Matches suppressed by an approved bypass                 |
+| bypassed-ids     | Comma-separated vulnerability IDs bypassed               |
+| severity-counts  | JSON object of counts by severity                        |
+| report-files     | Newline-separated list of report files written           |
 
 <!-- markdownlint-enable MD013 -->
 
