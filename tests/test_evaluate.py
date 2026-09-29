@@ -30,6 +30,7 @@ def match(
     fix: str | None = None,
     risk: float | None = None,
     epss: float | None = None,
+    ref: str | None = None,
 ) -> dict:
     """Build a synthetic Grype match."""
     vulnerability: dict = {"id": vuln, "severity": severity}
@@ -42,15 +43,16 @@ def match(
         vulnerability["risk"] = risk
     if epss is not None:
         vulnerability["epss"] = [{"cve": vuln, "epss": epss}]
-    return {
-        "vulnerability": vulnerability,
-        "artifact": {"name": package, "version": "1.0.0", "type": "apk"},
-    }
+    artifact: dict = {"name": package, "version": "1.0.0", "type": "apk"}
+    if ref:
+        artifact["id"] = ref
+    return {"vulnerability": vulnerability, "artifact": artifact}
 
 
 def run(
     matches: list[dict],
     sidecar: dict | str | bytes | None = None,
+    sbom: dict | str | None = None,
     **env_overrides,
 ) -> tuple[dict, str]:
     """Run the evaluator over one synthetic report; return outputs."""
@@ -61,6 +63,15 @@ def run(
         summary_file = pathlib.Path(tmp) / "summary"
         out_file.touch()
         summary_file.touch()
+
+        artefact = "sbom:test"
+        if sbom is not None:
+            sbom_file = pathlib.Path(tmp) / "sbom-cyclonedx.json"
+            sbom_file.write_text(
+                sbom if isinstance(sbom, str) else json.dumps(sbom),
+                encoding="utf-8",
+            )
+            artefact = f"sbom:{sbom_file}"
 
         if sidecar is not None:
             manifest = pathlib.Path(tmp) / "dependency-change.json"
@@ -76,7 +87,7 @@ def run(
         env = dict(os.environ)
         env.update(
             {
-                "MANIFEST": f"{report}|sbom:test",
+                "MANIFEST": f"{report}|{artefact}",
                 "INPUT_FAIL_ON": "high",
                 "INPUT_NAME": "",
                 "INPUT_SUMMARY": "true",
@@ -86,6 +97,10 @@ def run(
                 "INPUT_GATE_WHEN": "always",
                 "INPUT_DEPENDENCIES_CHANGED": "",
                 "INPUT_CHANGE_MANIFEST": "",
+                "INPUT_DEPENDENCY_POLICY": "all",
+                "INPUT_TRANSITIVE_FAIL_ON": "none",
+                "INPUT_DECLARED_SOURCE": "auto",
+                "INPUT_DECLARED_DEPENDENCIES": "",
                 "BYPASSES": "[]",
                 "BYPASS_REPO": "example/repo",
                 "GITHUB_OUTPUT": str(out_file),
@@ -351,6 +366,294 @@ check(
     "advisories are summarised even when clean runs are not",
     "CVE-1" in summary,
     summary,
+)
+
+print("dependency provenance")
+# Mirrors the reactor shape cyclonedx-maven emits: 'core' is a project
+# module, 'databind' is declared by it, and 'jcore' arrives only
+# because databind wants it. Absence of scope is what marks the
+# module, so this shape is the one worth guarding.
+REACTOR = {
+    "bomFormat": "CycloneDX",
+    "specVersion": "1.5",
+    "components": [
+        {"bom-ref": "core", "type": "library", "name": "core"},
+        {
+            "bom-ref": "databind",
+            "type": "library",
+            "name": "databind",
+            "scope": "required",
+        },
+        {
+            "bom-ref": "jcore",
+            "type": "library",
+            "name": "jcore",
+            "scope": "required",
+        },
+    ],
+    "dependencies": [
+        {"ref": "project", "dependsOn": []},
+        {"ref": "core", "dependsOn": ["databind"]},
+        {"ref": "databind", "dependsOn": ["jcore"]},
+        {"ref": "jcore", "dependsOn": []},
+    ],
+    "metadata": {
+        "component": {"bom-ref": "project", "name": "project"},
+        "tools": {"components": [{"name": "cyclonedx-maven-plugin"}]},
+    },
+}
+DECLARED = {"INPUT_DEPENDENCY_POLICY": "declared"}
+MIXED = [
+    match("databind", "CVE-D", "Critical", ref="databind"),
+    match("jcore", "CVE-T", "Critical", ref="jcore"),
+]
+
+outputs, summary = run(MIXED, sbom=REACTOR, **DECLARED)
+check("declared finding gates", outputs["gating-matches"] == "1", outputs)
+check("inherited finding warns", outputs["advisory-matches"] == "1", outputs)
+check("declared findings counted", outputs["direct-matches"] == "1", outputs)
+check("inherited findings counted", outputs["transitive-matches"] == "1", outputs)
+check(
+    "graph named as the source",
+    '"sbom-graph"' in outputs["provenance-source"],
+    outputs,
+)
+check("inherited table rendered", "Inherited dependencies" in summary)
+check("both findings listed", "CVE-D" in summary and "CVE-T" in summary)
+
+outputs, _ = run(MIXED, sbom=REACTOR)
+check(
+    "default policy gates both",
+    outputs["gating-matches"] == "2" and outputs["advisory-matches"] == "0",
+    outputs,
+)
+check(
+    "default policy still reports provenance accurately",
+    outputs["direct-matches"] == "1"
+    and outputs["transitive-matches"] == "1"
+    and '"sbom-graph"' in outputs["provenance-source"],
+    outputs,
+)
+
+outputs, _ = run(MIXED, sbom=REACTOR, **DECLARED, INPUT_TRANSITIVE_FAIL_ON="critical")
+check(
+    "transitive-fail-on gates severe inherited findings",
+    outputs["gating-matches"] == "2" and outputs["advisory-matches"] == "0",
+    outputs,
+)
+
+outputs, _ = run(
+    [match("jcore", "CVE-T", "High", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_TRANSITIVE_FAIL_ON="critical",
+)
+check(
+    "inherited findings below that threshold still warn",
+    outputs["advisory-matches"] == "1",
+    outputs,
+)
+
+print("the two thresholds are independent")
+# fail-on sits ABOVE transitive-fail-on here, so an inherited High
+# must gate even though a declared High would not. A prefilter on
+# fail-on would discard it before the transitive bar was consulted.
+outputs, _ = run(
+    [match("jcore", "CVE-T", "High", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_FAIL_ON="critical",
+    INPUT_TRANSITIVE_FAIL_ON="high",
+)
+check(
+    "an inherited finding gates below the fail-on bar",
+    outputs["gating-matches"] == "1",
+    outputs,
+)
+
+outputs, _ = run(
+    [match("databind", "CVE-D", "High", ref="databind")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_FAIL_ON="critical",
+    INPUT_TRANSITIVE_FAIL_ON="high",
+)
+check(
+    "a declared finding still answers to fail-on",
+    outputs["gating-matches"] == "0" and outputs["advisory-matches"] == "0",
+    outputs,
+)
+
+outputs, _ = run(
+    [match("jcore", "CVE-T", "Medium", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_FAIL_ON="critical",
+    INPUT_TRANSITIVE_FAIL_ON="high",
+)
+check(
+    "an inherited finding below both bars is neither",
+    outputs["gating-matches"] == "0" and outputs["advisory-matches"] == "0",
+    outputs,
+)
+
+outputs, _ = run(
+    [match("jcore", "CVE-T", "Low", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+)
+check(
+    "transitive-fail-on none still respects fail-on for warnings",
+    outputs["advisory-matches"] == "0" and outputs["total-matches"] == "1",
+    outputs,
+)
+
+outputs, _ = run(
+    [match("jcore", "CVE-T", "Critical", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_FAIL_ON="none",
+    INPUT_TRANSITIVE_FAIL_ON="high",
+)
+check(
+    "fail-on none disables gating for inherited findings too",
+    outputs["gating"] == "false" and outputs["advisory-matches"] == "0",
+    outputs,
+)
+check(
+    "fail-on none is described as a single bar",
+    outputs["threshold-label"] == "none",
+    outputs,
+)
+
+outputs, summary = run(
+    [match("jcore", "CVE-T", "High", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_FAIL_ON="critical",
+    INPUT_TRANSITIVE_FAIL_ON="high",
+)
+check(
+    "the summary names both bars when they differ",
+    "critical declared / high inherited" in summary,
+    summary,
+)
+
+outputs, summary = run([match("a", "CVE-1", "Critical")])
+check(
+    "a single bar is still named plainly",
+    "`high`" in summary and "declared /" not in summary,
+    summary,
+)
+
+print("only-fixed demotes rather than discards")
+outputs, summary = run(
+    [
+        match("a", "CVE-FIX", "Critical", fix="2.0.0"),
+        match("b", "CVE-NOFIX", "Critical"),
+    ],
+    INPUT_ONLY_FIXED="true",
+)
+check(
+    "a fixable finding still gates",
+    outputs["gating-matches"] == "1",
+    outputs,
+)
+check(
+    "an unfixable finding warns instead of vanishing",
+    outputs["advisory-matches"] == "1",
+    outputs,
+)
+check("both remain in the summary", "CVE-FIX" in summary and "CVE-NOFIX" in summary)
+check(
+    "a demoted finding is not labelled inherited",
+    "Inherited dependencies" not in summary,
+    summary,
+)
+
+outputs, summary = run(
+    [match("jcore", "CVE-T", "Critical", ref="jcore")],
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_TRANSITIVE_FAIL_ON="critical",
+    INPUT_ONLY_FIXED="true",
+)
+check(
+    "an inherited finding demoted by only-fixed is not labelled inherited",
+    outputs["advisory-matches"] == "1" and "Inherited dependencies" not in summary,
+    summary,
+)
+
+print("provenance fails closed")
+outputs, _ = run(MIXED, **DECLARED)
+check(
+    "nothing to classify against gates everything",
+    outputs["gating-matches"] == "2"
+    and '"none"' in outputs["provenance-source"]
+    and outputs["transitive-matches"] == "0",
+    outputs,
+)
+
+outputs, _ = run(MIXED, sbom={"components": [{"bom-ref": "jcore"}]}, **DECLARED)
+check(
+    "an SBOM without a graph gates everything",
+    outputs["gating-matches"] == "2" and '"none"' in outputs["provenance-source"],
+    outputs,
+)
+
+outputs, _ = run(MIXED, sbom="not json", **DECLARED)
+check(
+    "an unparsable SBOM gates everything",
+    outputs["gating-matches"] == "2" and '"none"' in outputs["provenance-source"],
+    outputs,
+)
+
+for label, broken in (
+    ("a non-object metadata", {"metadata": "bad", "dependencies": []}),
+    ("a non-list dependencies", {"dependencies": 7}),
+    ("a non-list components", {"components": 7, "dependencies": []}),
+    (
+        "a non-list dependsOn",
+        {"dependencies": [{"ref": "a", "dependsOn": 7}]},
+    ),
+):
+    outputs, _ = run(MIXED, sbom=broken, **DECLARED)
+    check(
+        f"{label} gates rather than aborting",
+        outputs["gating-matches"] == "2",
+        outputs,
+    )
+
+outputs, _ = run(
+    MIXED,
+    sbom=REACTOR,
+    **DECLARED,
+    INPUT_DECLARED_DEPENDENCIES="/nonexistent/declared.txt",
+)
+check(
+    "an unreadable declared list does not fall back to the graph",
+    outputs["gating-matches"] == "2" and '"none"' in outputs["provenance-source"],
+    outputs,
+)
+
+outputs, _ = run(MIXED, sbom=REACTOR, **DECLARED, INPUT_DECLARED_SOURCE="none")
+check(
+    "declared-source none disables the leniency",
+    outputs["gating-matches"] == "2",
+    outputs,
+)
+
+outputs, _ = run(
+    MIXED,
+    sbom=REACTOR,
+    **DECLARED,
+    **GATE_ON_CHANGE,
+    INPUT_DEPENDENCIES_CHANGED="false",
+)
+check(
+    "an unarmed gate outranks provenance",
+    outputs["gating"] == "false" and outputs["advisory-matches"] == "2",
+    outputs,
 )
 
 print()
