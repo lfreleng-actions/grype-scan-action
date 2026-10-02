@@ -22,12 +22,16 @@ python_version = "3.10"
 warn_unused_ignores = true
 
 [tool.basedpyright]
+# The floor requires-python declares.
+pythonVersion = "3.10"
+pythonPlatform = "All"
 # Standard mode keeps error-level type checking while avoiding the
 # strict-only warnings (reportAny, reportUnknownMemberType and friends)
 # that fire throughout on JSON parsed from an external tool, where the
 # shape is genuinely dynamic.
 typeCheckingMode = "standard"
-# The basedpyright pre-commit mirror bundles its own runtime and cannot
-# carry project dependencies; mypy performs the import-aware checking.
-reportMissingImports = false
-reportMissingModuleSource = false
+# The directories the pre-commit hook passes as explicit targets.
+# Explicit arguments override include, so this governs the runs that
+# name no targets, a bare basedpyright and an editor's language
+# server, which then analyse the same set the hook does.
+include = ["scripts", "tests"]
