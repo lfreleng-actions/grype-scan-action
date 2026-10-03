@@ -89,6 +89,48 @@ inputs:
       glob, so it may safely share the SBOM's naming pattern.
     required: false
     default: ""
+  dependency-policy:
+    description: >
+      Which findings gate. 'all' gates every qualifying finding, the
+      historical behaviour. 'declared' gates only packages the project
+      declared, reporting inherited ones as warnings, since a project
+      has no direct route to a fix in a package it never asked for.
+      Anything that cannot be classified counts as declared.
+    required: false
+    default: "all"
+  transitive-fail-on:
+    description: >
+      Lowest severity at which an inherited package gates, under
+      dependency-policy 'declared'. An independent bar, not a filter
+      layered on fail-on, and either may be the lower of the two. An
+      inherited finding gates when it reaches this severity, is
+      reported as a warning when it reaches fail-on but not this, and
+      is reported without a warning when it reaches neither. 'none'
+      means an inherited package never gates.
+    required: false
+    default: "none"
+  declared-source:
+    description: >
+      Where the declared set comes from: 'auto' prefers
+      declared-dependencies and falls back to the SBOM dependency
+      graph, 'sbom-graph' and 'file' force one, 'none' disables
+      classification. The graph is read from CycloneDX JSON only, and
+      only from a generator whose output has been measured. An
+      unusable source leaves every finding classified as declared,
+      which gates.
+    required: false
+    default: "auto"
+  declared-dependencies:
+    description: >
+      Path to a list of packages the project declares, one purl or
+      name per line, '#' for comments. Needed where the SBOM carries
+      no usable dependency graph. The list must be complete: a package
+      missing from it counts as inherited. An empty file counts as no
+      list, so a truncated one cannot mark every package inherited.
+      The file is excluded from the sbom glob, so it may safely share
+      the SBOM's naming pattern.
+    required: false
+    default: ""
   ignore-states:
     description: >
       Comma-separated fix states to ignore, from: fixed, not-fixed,
@@ -291,6 +333,18 @@ outputs:
   advisory-matches:
     description: "Matches reported as warnings rather than blocking"
     value: ${{ steps.evaluate.outputs.advisory-matches }}
+  direct-matches:
+    description: "Matches in packages the project declares"
+    value: ${{ steps.evaluate.outputs.direct-matches }}
+  transitive-matches:
+    description: "Matches in packages the project inherited"
+    value: ${{ steps.evaluate.outputs.transitive-matches }}
+  provenance-source:
+    description: >
+      JSON object mapping each scanned artefact to the classifier that
+      answered for it: sbom-graph, file, or none where provenance
+      could not be established and every finding stayed declared.
+    value: ${{ steps.evaluate.outputs.provenance-source }}
   gate-active:
     description: >
       'true' when a qualifying finding could block this run. False
@@ -330,6 +384,9 @@ runs:
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_GATE_WHEN: ${{ inputs.gate-when }}
         INPUT_DEPENDENCIES_CHANGED: ${{ inputs.dependencies-changed }}
+        INPUT_DEPENDENCY_POLICY: ${{ inputs.dependency-policy }}
+        INPUT_TRANSITIVE_FAIL_ON: ${{ inputs.transitive-fail-on }}
+        INPUT_DECLARED_SOURCE: ${{ inputs.declared-source }}
         INPUT_SORT_BY: ${{ inputs.sort-by }}
         INPUT_FORMATS: ${{ inputs.output-formats }}
         INPUT_PREFIX: ${{ inputs.output-prefix }}
@@ -389,6 +446,35 @@ runs:
             echo "::error::dependencies-changed must be 'true'," \
               "'false' or empty; got" \
               "'${INPUT_DEPENDENCIES_CHANGED}'"
+            exit 1
+            ;;
+        esac
+
+        case "${INPUT_DEPENDENCY_POLICY}" in
+          all|declared) ;;
+          *)
+            echo "::error::dependency-policy must be 'all' or" \
+              "'declared'; got '${INPUT_DEPENDENCY_POLICY}'"
+            exit 1
+            ;;
+        esac
+
+        case "${INPUT_TRANSITIVE_FAIL_ON}" in
+          negligible|low|medium|high|critical|none) ;;
+          *)
+            echo "::error::transitive-fail-on must be one of" \
+              "negligible, low, medium, high, critical, none; got" \
+              "'${INPUT_TRANSITIVE_FAIL_ON}'"
+            exit 1
+            ;;
+        esac
+
+        case "${INPUT_DECLARED_SOURCE}" in
+          auto|sbom-graph|file|none) ;;
+          *)
+            echo "::error::declared-source must be one of auto," \
+              "sbom-graph, file, none; got" \
+              "'${INPUT_DECLARED_SOURCE}'"
             exit 1
             ;;
         esac
@@ -795,6 +881,7 @@ runs:
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_FAIL_ON_MISSING: ${{ inputs.fail-on-missing-sbom }}
         INPUT_CHANGE_MANIFEST: ${{ inputs.dependency-change-manifest }}
+        INPUT_DECLARED: ${{ inputs.declared-dependencies }}
         INPUT_PREFIX: ${{ inputs.output-prefix }}
         INPUT_FORMATS: ${{ inputs.output-formats }}
         INPUT_ONLY_FIXED: ${{ inputs.only-fixed }}
@@ -867,20 +954,30 @@ runs:
             compgen -G "${INPUT_SBOM}" || true
           )
           shopt -u nullglob
-          # The dependency-change sidecar legitimately sits beside the
-          # SBOM and can match the same glob, which would make Grype
-          # try to scan it and fail the step before evaluation ever
-          # runs. Drop it here rather than leaving callers to pick a
-          # name that happens not to collide. -ef compares the files
-          # themselves, so a relative glob match and an absolute
-          # manifest path still resolve to the same file.
+          # A sidecar legitimately sits beside the SBOM and can match
+          # the same glob, which would make Grype try to scan it and
+          # fail the step before evaluation ever runs. Drop them here
+          # rather than leaving callers to pick names that happen not
+          # to collide. -ef compares the files themselves, so a
+          # relative glob match and an absolute sidecar path still
+          # resolve to the same file.
+          declare -a sidecars=()
+          for sidecar in "${INPUT_CHANGE_MANIFEST}" "${INPUT_DECLARED}"; do
+            if [ -n "${sidecar}" ] && [ -e "${sidecar}" ]; then
+              sidecars+=("${sidecar}")
+            fi
+          done
           declare -a scannable=()
           for match in "${matches[@]}"; do
-            if [ -n "${INPUT_CHANGE_MANIFEST}" ] &&
-              [ -e "${INPUT_CHANGE_MANIFEST}" ] &&
-              [ "${match}" -ef "${INPUT_CHANGE_MANIFEST}" ]; then
-              echo "Excluding the dependency-change sidecar from the" \
-                "scan: ${match}"
+            excluded=""
+            for sidecar in ${sidecars[@]+"${sidecars[@]}"}; do
+              if [ "${match}" -ef "${sidecar}" ]; then
+                excluded="yes"
+                break
+              fi
+            done
+            if [ -n "${excluded}" ]; then
+              echo "Excluding sidecar from the scan: ${match}"
               continue
             fi
             scannable+=("${match}")
@@ -1025,6 +1122,10 @@ runs:
         INPUT_GATE_WHEN: ${{ inputs.gate-when }}
         INPUT_DEPENDENCIES_CHANGED: ${{ inputs.dependencies-changed }}
         INPUT_CHANGE_MANIFEST: ${{ inputs.dependency-change-manifest }}
+        INPUT_DEPENDENCY_POLICY: ${{ inputs.dependency-policy }}
+        INPUT_TRANSITIVE_FAIL_ON: ${{ inputs.transitive-fail-on }}
+        INPUT_DECLARED_SOURCE: ${{ inputs.declared-source }}
+        INPUT_DECLARED_DEPENDENCIES: ${{ inputs.declared-dependencies }}
         BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
       run: |
         # Turn the JSON report(s) into a table, counts and a verdict.
@@ -1050,9 +1151,11 @@ runs:
         GATING_MATCHES: ${{ steps.evaluate.outputs.gating-matches }}
         ADVISORY: ${{ steps.evaluate.outputs.advisory-matches || '0' }}
         GATE_REASON: ${{ steps.evaluate.outputs.gate-reason }}
+        GATE_ACTIVE: ${{ steps.evaluate.outputs.gate-active }}
+        # yamllint disable-line rule:line-length
+        THRESHOLD: ${{ steps.evaluate.outputs.threshold-label || inputs.fail-on }}
         BYPASSED: ${{ steps.evaluate.outputs.bypassed-matches }}
         PERMIT_FAIL: ${{ inputs.permit-fail }}
-        FAIL_ON: ${{ inputs.fail-on }}
       run: |
         # Fail the step last, so the summary and artefacts are already
         # in place when the run goes red.
@@ -1063,28 +1166,38 @@ runs:
             "approved bypass issue"
         fi
 
-        if [ "${GATING}" != "true" ]; then
-          if [ "${ADVISORY}" != "0" ]; then
-            # Annotate rather than stay silent: the findings are real,
-            # and the only reason they are not blocking is that this
-            # change cannot have caused them.
+        if [ "${ADVISORY}" != "0" ]; then
+          # Annotate rather than stay silent: the findings are real.
+          # Either this change cannot have caused them, or the project
+          # does not own the package they affect.
+          if [ "${GATE_ACTIVE}" = "true" ]; then
             echo "::warning::${ADVISORY} finding(s) at or above" \
-              "'${FAIL_ON}' reported as warnings because" \
+              "'${THRESHOLD}' do not block this run. See the job" \
+              "summary for the affected packages and CVEs."
+          else
+            echo "::warning::${ADVISORY} finding(s) at or above" \
+              "'${THRESHOLD}' reported as warnings because" \
               "${GATE_REASON}. See the job summary for the affected" \
               "packages and CVEs."
-            exit 0
           fi
-          echo "No findings at or above '${FAIL_ON}' ✅"
+        fi
+
+        if [ "${GATING}" != "true" ]; then
+          if [ "${ADVISORY}" = "0" ]; then
+            echo "No findings at or above '${THRESHOLD}' ✅"
+          else
+            echo "No blocking findings at or above '${THRESHOLD}' ✅"
+          fi
           exit 0
         fi
 
         if [ "${PERMIT_FAIL}" = "true" ]; then
           echo "::warning::${GATING_MATCHES} finding(s) at or above" \
-            "'${FAIL_ON}', but permit-fail is set so the step passes"
+            "'${THRESHOLD}', but permit-fail is set so the step passes"
           exit 0
         fi
 
         echo "::error::${GATING_MATCHES} finding(s) at or above" \
-          "'${FAIL_ON}'. See the job summary for the affected" \
+          "'${THRESHOLD}'. See the job summary for the affected" \
           "packages and CVEs."
         exit 1

@@ -18,6 +18,9 @@ import os
 import sys
 
 from scripts.model import (
+    ADVISORY_INHERITED,
+    ADVISORY_UNARMED,
+    ADVISORY_UNFIXABLE,
     Report,
     Section,
     Settings,
@@ -27,6 +30,7 @@ from scripts.model import (
     risk_value,
     severity_rank,
 )
+from scripts.provenance import DIRECT, TRANSITIVE, build
 from scripts.render import write_summary
 
 
@@ -70,6 +74,12 @@ def sibling_reports(report: str) -> list[str]:
     return found
 
 
+def sbom_path(artefact: str) -> str:
+    """The SBOM file behind a manifest entry, empty for a target."""
+    prefix = "sbom:"
+    return artefact[len(prefix) :] if artefact.startswith(prefix) else ""
+
+
 def build_row(match: dict) -> dict:
     """Flatten a Grype match into the fields the table renders."""
     vulnerability = match.get("vulnerability", {}) or {}
@@ -90,6 +100,23 @@ def build_row(match: dict) -> dict:
     }
 
 
+def verdict_threshold(row: dict, settings: Settings) -> int | None:
+    """The bar this finding has to clear to block the run.
+
+    Declared packages answer to fail-on and inherited ones to
+    transitive-fail-on. The two are independent bars, not one filter
+    layered on the other: a project may hold what it declares to
+    'medium' while only stopping for 'critical' in what those
+    declarations drag in behind them. None means this finding can
+    never gate.
+    """
+    if settings.threshold is None:
+        return None
+    if settings.policy_declared and row.get("provenance") == TRANSITIVE:
+        return settings.transitive_threshold
+    return settings.threshold
+
+
 def collect(settings: Settings, bypasses: dict[str, dict]) -> Report:
     """Read every report and sort findings into their buckets."""
     report = Report()
@@ -102,8 +129,17 @@ def collect(settings: Settings, bypasses: dict[str, dict]) -> Report:
             data = json.load(handle)
 
         section = Section(artefact=artefact)
+        # Classified whatever the policy: dependency-policy decides
+        # which findings block, not whether the provenance outputs
+        # tell the truth. A project still on 'all' can read them to
+        # see what switching to 'declared' would change.
+        provenance = build(
+            sbom_path(artefact), settings.declared_path, settings.declared_source
+        )
+        section.provenance_source = provenance.source
         for match in data.get("matches", []):
             row = build_row(match)
+            row["provenance"] = provenance.classify(match.get("artifact") or {})
             report.total += 1
             report.severity_counts[row["severity"]] = (
                 report.severity_counts.get(row["severity"], 0) + 1
@@ -112,30 +148,63 @@ def collect(settings: Settings, bypasses: dict[str, dict]) -> Report:
             # even when the threshold is 'none' or nothing gates.
             section.rows.append(row)
 
-            if settings.threshold is None:
+            rank = severity_rank(row["severity"])
+            gate_at = verdict_threshold(row, settings)
+            gates = gate_at is not None and rank >= gate_at
+            # Worth reporting as a warning: clears the project's own
+            # bar, but not the one that applies to this finding. An
+            # inherited package nobody declared lands here, and so
+            # does everything when the gate is unarmed.
+            warns = (
+                settings.threshold is not None
+                and rank >= settings.threshold
+                and not gates
+            )
+            if not gates and not warns:
                 continue
-            if severity_rank(row["severity"]) < settings.threshold:
-                continue
-            # only-fixed narrows the GATE, not the report: an advisory
-            # nobody can act on still appears in the table, but does
-            # not block the run.
-            if settings.only_fixed and not row["fixable"]:
-                continue
+            # only-fixed narrows the GATE, not the report. A finding
+            # no bump can clear is demoted to a warning rather than
+            # dropped, so it stays visible in the summary instead of
+            # vanishing from a run that has other findings to show.
+            demoted = gates and settings.only_fixed and not row["fixable"]
+            if demoted:
+                gates = False
+                warns = True
 
             bypass = bypasses.get(str(row["id"]).upper())
             if bypass:
                 row["bypass"] = bypass
                 section.bypassed.append(row)
-            elif settings.gate_active:
+            elif gates and settings.gate_active:
                 section.gating.append(row)
             else:
-                # Meets the threshold, but nothing blocks this run.
-                # The finding still gets reported and annotated; only
-                # the verdict changes.
+                if not settings.gate_active:
+                    row["advisory_reason"] = ADVISORY_UNARMED
+                elif demoted:
+                    row["advisory_reason"] = ADVISORY_UNFIXABLE
+                else:
+                    row["advisory_reason"] = ADVISORY_INHERITED
                 section.advisory.append(row)
 
         report.sections.append(section)
     return report
+
+
+def count_provenance(report: Report, value: str) -> int:
+    """How many reported findings carry this provenance."""
+    return sum(1 for row in report.rows if row.get("provenance") == value)
+
+
+def provenance_sources(report: Report) -> str:
+    """Which classifier answered, keyed by the artefact it scanned.
+
+    A multi-SBOM run can classify one artefact and fail closed on
+    another; collapsing that to a set would hide which was which.
+    """
+    return json.dumps(
+        {section.artefact: section.provenance_source for section in report.sections},
+        sort_keys=True,
+    )
 
 
 def write_outputs(report: Report, settings: Settings) -> None:
@@ -145,8 +214,12 @@ def write_outputs(report: Report, settings: Settings) -> None:
     emit("gating-matches", str(len(report.gating)))
     emit("advisory-matches", str(len(report.advisory)))
     emit("bypassed-matches", str(len(report.bypassed)))
+    emit("direct-matches", str(count_provenance(report, DIRECT)))
+    emit("transitive-matches", str(count_provenance(report, TRANSITIVE)))
+    emit("provenance-source", provenance_sources(report))
     emit("gate-active", "true" if settings.can_gate else "false")
     emit("gate-reason", settings.gate_reason)
+    emit("threshold-label", settings.threshold_label)
     emit(
         "bypassed-ids",
         ",".join(sorted({str(row["id"]) for row in report.bypassed})),
@@ -166,6 +239,12 @@ def main() -> int:
         f"{len(report.advisory)} advisory, {len(report.bypassed)} "
         f"bypassed (threshold '{settings.fail_on}')"
     )
+    if settings.policy_declared:
+        print(
+            f"Provenance: {count_provenance(report, DIRECT)} declared, "
+            f"{count_provenance(report, TRANSITIVE)} inherited "
+            f"(source: {provenance_sources(report)})"
+        )
     if not settings.gate_active:
         print(f"Findings do not block this run: {settings.gate_reason}")
     return 0

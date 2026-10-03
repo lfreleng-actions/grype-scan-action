@@ -16,6 +16,18 @@ SEVERITY_ORDER = ["negligible", "low", "medium", "high", "critical"]
 # default, so upgrading the action cannot change a consumer's verdict.
 GATE_ALWAYS = "always"
 GATE_ON_CHANGE = "dependencies-changed"
+
+# Gating policies. 'all' gates every qualifying finding; 'declared'
+# gates only what the project asked for, warning on what it inherited.
+POLICY_ALL = "all"
+POLICY_DECLARED = "declared"
+
+# Why a finding was reported rather than blocking. A row can reach the
+# advisory bucket by more than one route, and the summary has to name
+# the cause correctly rather than assume the most recent feature.
+ADVISORY_UNARMED = "unarmed"
+ADVISORY_INHERITED = "inherited"
+ADVISORY_UNFIXABLE = "unfixable"
 SEVERITY_ICON = {
     "critical": "🔴",
     "high": "🟠",
@@ -154,6 +166,7 @@ class Section:
     gating: list[dict] = field(default_factory=list)
     bypassed: list[dict] = field(default_factory=list)
     advisory: list[dict] = field(default_factory=list)
+    provenance_source: str = "none"
 
 
 @dataclass
@@ -201,6 +214,16 @@ class Settings:
     only_fixed: bool
     gate_active: bool
     change_reason: str
+    dependency_policy: str
+    transitive_fail_on: str
+    transitive_threshold: int | None
+    declared_source: str
+    declared_path: str
+
+    @property
+    def policy_declared(self) -> bool:
+        """Whether inherited dependencies are treated more leniently."""
+        return self.dependency_policy == POLICY_DECLARED
 
     @property
     def can_gate(self) -> bool:
@@ -225,6 +248,26 @@ class Settings:
             return "no severity threshold is configured"
         return self.change_reason
 
+    @property
+    def threshold_label(self) -> str:
+        """How to describe the bar findings had to clear.
+
+        Naming fail-on alone is right while one bar is in play, and
+        wrong once inherited packages answer to a different one: a
+        finding can then gate below fail-on, and a message claiming
+        otherwise would contradict the table beside it. A fail-on of
+        'none' disables every gate, the transitive one included, so it
+        is a single bar again however transitive-fail-on is set.
+        """
+        if (
+            not self.policy_declared
+            or self.threshold is None
+            or self.transitive_threshold is None
+            or self.transitive_threshold == self.threshold
+        ):
+            return self.fail_on
+        return f"{self.fail_on} declared / {self.transitive_fail_on} inherited"
+
     @classmethod
     def from_env(cls) -> Settings:
         """Build settings from the action's environment."""
@@ -238,6 +281,7 @@ class Settings:
             os.environ.get("INPUT_DEPENDENCIES_CHANGED") or "",
             os.environ.get("INPUT_CHANGE_MANIFEST") or "",
         )
+        transitive = (os.environ.get("INPUT_TRANSITIVE_FAIL_ON") or "none").lower()
         return cls(
             fail_on=fail_on,
             threshold=severity_rank(fail_on) if fail_on != "none" else None,
@@ -252,4 +296,13 @@ class Settings:
             only_fixed=os.environ.get("INPUT_ONLY_FIXED", "false") == "true",
             gate_active=gate_active,
             change_reason=change_reason,
+            dependency_policy=(
+                os.environ.get("INPUT_DEPENDENCY_POLICY") or POLICY_ALL
+            ).lower(),
+            transitive_fail_on=transitive,
+            transitive_threshold=(
+                severity_rank(transitive) if transitive != "none" else None
+            ),
+            declared_source=(os.environ.get("INPUT_DECLARED_SOURCE") or "auto").lower(),
+            declared_path=os.environ.get("INPUT_DECLARED_DEPENDENCIES") or "",
         )

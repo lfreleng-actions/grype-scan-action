@@ -254,6 +254,55 @@ jobs:
           echo "Error: invalid dependencies-changed was accepted ❌"
           exit 1
 
+      - name: "Invalid dependency-policy"
+        id: bad_policy
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          dependency-policy: "lenient"
+
+      - name: "Error if invalid dependency-policy did NOT fail"
+        if: steps.bad_policy.outcome == 'success'
+        shell: bash
+        run: |
+          # Gating policies are a closed set
+          echo "Error: invalid dependency-policy was accepted ❌"
+          exit 1
+
+      - name: "Invalid transitive-fail-on"
+        id: bad_transitive
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          dependency-policy: "declared"
+          transitive-fail-on: "severe"
+
+      - name: "Error if invalid transitive-fail-on did NOT fail"
+        if: steps.bad_transitive.outcome == 'success'
+        shell: bash
+        run: |
+          # Silently reading as 'none' would widen the leniency
+          echo "Error: invalid transitive-fail-on was accepted ❌"
+          exit 1
+
+      - name: "Invalid declared-source"
+        id: bad_declared_source
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          declared-source: "guess"
+
+      - name: "Error if invalid declared-source did NOT fail"
+        if: steps.bad_declared_source.outcome == 'success'
+        shell: bash
+        run: |
+          # Classification sources are a closed set
+          echo "Error: invalid declared-source was accepted ❌"
+          exit 1
+
       - name: "Output formats without json"
         id: no_json
         continue-on-error: true
@@ -463,6 +512,126 @@ jobs:
           esac
           echo "Unresolved change signal failed closed ✅"
 
+      # --- provenance: gate what the project declared ------------
+      # The reactor shape cyclonedx-maven emits, which is the one that
+      # matters: 'core' is a project module carrying no scope, so it
+      # must not be mistaken for a third-party library, and what it
+      # declares must not be mistaken for what that declaration drags
+      # in behind it. metadata.tools names the generator because the
+      # scope convention belongs to that tool rather than to CycloneDX.
+      - name: "Write a reactor SBOM with a vulnerable declared package"
+        shell: bash
+        run: |
+          # lodash 4.17.4 is declared; minimist 1.2.0 only arrives
+          # because lodash wants it. Both report findings
+          set -euo pipefail
+          cat > declared-vulnerable.json <<'JSON'
+          {"bomFormat": "CycloneDX", "specVersion": "1.5",
+           "version": 1,
+           "metadata": {
+             "component":
+               {"bom-ref": "project", "name": "demo",
+                "type": "application"},
+             "tools": {"components":
+               [{"name": "cyclonedx-maven-plugin"}]}},
+           "components": [
+             {"bom-ref": "core", "type": "library",
+              "name": "demo-core", "version": "1.0.0"},
+             {"bom-ref": "lodash", "type": "library",
+              "name": "lodash", "version": "4.17.4",
+              "scope": "required",
+              "purl": "pkg:npm/lodash@4.17.4"},
+             {"bom-ref": "minimist", "type": "library",
+              "name": "minimist", "version": "1.2.0",
+              "scope": "required",
+              "purl": "pkg:npm/minimist@1.2.0"}
+           ],
+           "dependencies": [
+             {"ref": "project", "dependsOn": []},
+             {"ref": "core", "dependsOn": ["lodash"]},
+             {"ref": "lodash", "dependsOn": ["minimist"]},
+             {"ref": "minimist", "dependsOn": []}
+           ]}
+          JSON
+
+      - name: "Scan with dependency-policy declared"
+        id: declared_policy
+        continue-on-error: true
+        uses: $/
+        with:
+          sbom: "declared-vulnerable.json"
+          fail-on: "high"
+          dependency-policy: "declared"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate declared gates while inherited warns"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.declared_policy.outcome }}
+          GATING: ${{ steps.declared_policy.outputs.gating-matches }}
+          ADVISORY: ${{ steps.declared_policy.outputs.advisory-matches }}
+          DIRECT: ${{ steps.declared_policy.outputs.direct-matches }}
+          TRANSITIVE: ${{ steps.declared_policy.outputs.transitive-matches }}
+          SOURCE: ${{ steps.declared_policy.outputs.provenance-source }}
+        run: |
+          # A declared package with findings must still fail the step,
+          # and the graph must be what classified it
+          set -euo pipefail
+          echo "gating=${GATING} advisory=${ADVISORY}"
+          echo "direct=${DIRECT} transitive=${TRANSITIVE}"
+          echo "source=${SOURCE}"
+          # provenance-source maps each artefact to its classifier, so
+          # assert on the value rather than an exact string
+          if ! printf '%s' "${SOURCE}" | jq -e \
+            'to_entries | all(.value == "sbom-graph")' > /dev/null; then
+            echo "Expected the SBOM graph to classify findings ❌"
+            exit 1
+          fi
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "Expected a declared package to fail the step ❌"
+            exit 1
+          fi
+          if [ "${GATING}" -lt 1 ] || [ "${DIRECT}" -lt 1 ]; then
+            echo "Expected declared findings to gate ❌"
+            exit 1
+          fi
+          if [ "${ADVISORY}" -lt 1 ] || [ "${TRANSITIVE}" -lt 1 ]; then
+            echo "Expected inherited findings to warn ❌"
+            exit 1
+          fi
+          echo "Declared gated, inherited warned ✅"
+
+      - name: "Scan the same SBOM with the default policy"
+        id: all_policy
+        continue-on-error: true
+        uses: $/
+        with:
+          sbom: "declared-vulnerable.json"
+          fail-on: "high"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate the default policy gates both"
+        shell: bash
+        env:
+          GATING_ALL: ${{ steps.all_policy.outputs.gating-matches }}
+          GATING_DECLARED: ${{ steps.declared_policy.outputs.gating-matches }}
+          ADVISORY: ${{ steps.all_policy.outputs.advisory-matches }}
+        run: |
+          # Same SBOM, same threshold: the only difference is policy,
+          # so 'all' must gate strictly more than 'declared'
+          set -euo pipefail
+          if [ "${ADVISORY}" != "0" ]; then
+            echo "Expected no advisories under the default policy ❌"
+            exit 1
+          fi
+          if [ "${GATING_ALL}" -le "${GATING_DECLARED}" ]; then
+            echo "Expected 'all' to gate more than 'declared' ❌"
+            exit 1
+          fi
+          echo "Default policy gated every finding ✅"
+
   ### Unit tests for the report evaluation ###
       # The cache is unavailable to a plain `act`-style run but present
       # in CI, so these exercise the mode end to end rather than just
@@ -589,3 +758,4 @@ jobs:
           python3 tests/test_evaluate.py
           python3 tests/test_collect_bypasses.py
           python3 tests/test_db_cache.py
+          python3 tests/test_provenance.py
