@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 from scripts.model import (
+    ADVISORY_INHERITED,
     SEVERITY_ICON,
     Report,
     Settings,
@@ -39,18 +40,42 @@ def render_counts(report: Report, settings: Settings) -> list[str]:
     elif report.gating:
         lines.append(
             f"**{len(report.gating)} finding(s) at or above "
-            f"`{settings.fail_on}` block this run.**"
+            f"`{settings.threshold_label}` block this run.**"
+        )
+    elif report.advisory and settings.gate_active:
+        lines.append(
+            f"**{len(report.advisory)} finding(s) at or above "
+            f"`{settings.threshold_label}` reported as warnings.**"
         )
     elif report.advisory:
         lines.append(
             f"**{len(report.advisory)} finding(s) at or above "
-            f"`{settings.fail_on}` reported as warnings.** "
+            f"`{settings.threshold_label}` reported as warnings.** "
             f"They do not block this run because "
             f"{settings.gate_reason}."
         )
     else:
-        lines.append(f"No findings at or above `{settings.fail_on}`. ✅")
+        lines.append(f"No findings at or above `{settings.threshold_label}`. ✅")
+
+    if report.gating and report.advisory:
+        lines.append(
+            f"A further {len(report.advisory)} finding(s) are reported as warnings."
+        )
     return lines
+
+
+def advisory_heading(rows: list[dict]) -> str:
+    """Why this table is reported rather than blocking the run.
+
+    A row can land here for more than one reason: an unarmed gate, an
+    inherited package, or a finding no bump can clear. Provenance
+    alone does not settle it, since only-fixed can demote an inherited
+    finding that did clear its own threshold. Name the cause only when
+    every row shares it.
+    """
+    if rows and all(row.get("advisory_reason") == ADVISORY_INHERITED for row in rows):
+        return "Inherited dependencies; reported as warnings"
+    return "Reported as warnings; not blocking this run"
 
 
 def render_findings_table(rows: list[dict], max_rows: int) -> list[str]:
@@ -143,11 +168,11 @@ def render_summary(report: Report, settings: Settings) -> str:
             lines.extend([f"### {section.artefact}", ""])
         if section.gating:
             lines.extend(render_findings_table(section.gating, settings.max_rows))
-        elif section.advisory:
-            lines.append("_Reported as warnings; not blocking this run:_")
+        if section.advisory:
+            lines.append(f"_{advisory_heading(section.advisory)}:_")
             lines.append("")
             lines.extend(render_findings_table(section.advisory, settings.max_rows))
-        else:
+        if not section.gating and not section.advisory:
             # Nothing gates, but the findings still belong on the run
             # page: reporting-only scans and sub-threshold results are
             # exactly when someone wants to see what turned up.
@@ -157,12 +182,23 @@ def render_summary(report: Report, settings: Settings) -> str:
         if section.bypassed:
             lines.extend(render_bypassed(section.bypassed))
 
-    if report.advisory:
+    if report.advisory and not settings.gate_active:
         lines.extend(
             [
-                "A change that touches the dependency chain will gate "
-                "on these findings, so they are worth clearing before "
+                "A change that touches the dependency chain re-arms "
+                "the gate, so these findings are worth clearing before "
                 "the next dependency update rather than after it.",
+                "",
+            ]
+        )
+    elif report.advisory and all(
+        row.get("advisory_reason") == ADVISORY_INHERITED for row in report.advisory
+    ):
+        lines.extend(
+            [
+                "These findings affect packages the project does not "
+                "declare. Clearing one means an upstream fix, or "
+                "replacing the dependency that pulls it in.",
                 "",
             ]
         )
