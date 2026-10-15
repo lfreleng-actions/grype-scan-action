@@ -32,7 +32,22 @@ from scripts.provenance import (  # noqa: E402
 FAILURES: list[str] = []
 
 
-def check(label: str, condition: bool, detail: object = "") -> None:
+def check(
+    label: str, condition: bool, detail: object = "", expect_fail: bool = False
+) -> None:
+    """Record one result.
+
+    ``expect_fail`` marks a test that lands ahead of the code making it
+    pass. It is strict: an unexpected pass fails the suite, so the
+    marker cannot outlive its fix.
+    """
+    if expect_fail:
+        if condition:
+            print(f"  ❌ {label} passed but is marked expect_fail")
+            FAILURES.append(label)
+        else:
+            print(f"  ⏳ {label} (expected to fail)")
+        return
     if condition:
         print(f"  ✅ {label}")
     else:
@@ -402,6 +417,261 @@ check(
     "a lookalike qualifier key is not the marker",
     classes.get(lookalike) == TRANSITIVE,
     classes,
+)
+
+print("cargo workspace (cargo-cyclonedx, as sbom-action emits it)")
+# Mirrors real cargo-cyclonedx 0.5.9 output generated with sbom-action
+# v0.4.0's exact flags, paths neutralised. Every component carries a
+# scope, members included, so scope cannot separate them; the bom-ref
+# is cargo's package ID, which names the package's source instead.
+# Purls are written out as the generator emits them: a path crate's
+# carries a download_url relative to the crate being described, so it
+# cannot be derived from the ref. metadata.tools keeps the 1.4 list
+# form even at schema 1.5.
+REG = "registry+https://github.com/rust-lang/crates.io-index#"
+C_SMALLVEC = REG + "smallvec@1.6.0"
+C_CHRONO = REG + "chrono@0.4.19"
+C_TIME = REG + "time@0.1.45"
+C_SEMVER = REG + "semver@1.0.28"
+C_VCHECK = REG + "version_check@0.9.5"
+C_AUTOCFG = REG + "autocfg@1.5.1"
+C_NUMTRAITS = REG + "num-traits@0.2.19"
+C_APP = "path+file:///work/app#app@0.1.0"
+C_CORE = "path+file:///work/ws/core#0.1.0"
+C_CLI = "path+file:///work/ws/cli#0.1.0"
+C_ROOT = "path+file:///work/ws"
+CARGO_PURLS = {
+    C_SMALLVEC: "pkg:cargo/smallvec@1.6.0",
+    C_CHRONO: "pkg:cargo/chrono@0.4.19",
+    C_TIME: "pkg:cargo/time@0.1.45",
+    C_SEMVER: "pkg:cargo/semver@1.0.28",
+    C_VCHECK: "pkg:cargo/version_check@0.9.5",
+    C_AUTOCFG: "pkg:cargo/autocfg@1.5.1",
+    C_NUMTRAITS: "pkg:cargo/num-traits@0.2.19",
+}
+
+
+def cargo_document(
+    root: str,
+    entries: list,
+    graph: dict,
+    spec: str = "1.5",
+    member_purls: dict | None = None,
+) -> dict:
+    """A document in the shape cargo-cyclonedx emits."""
+    purls = {**CARGO_PURLS, **(member_purls or {})}
+    doc = document(
+        root,
+        [component(ref, purl=purls.get(ref), scope=scope) for ref, scope in entries],
+        graph,
+    )
+    doc["specVersion"] = spec
+    doc["metadata"]["tools"] = [{"vendor": "CycloneDX", "name": "cargo-cyclonedx"}]
+    doc["metadata"]["component"]["scope"] = "required"
+    # Cargo targets nest under the root and appear nowhere in the graph.
+    doc["metadata"]["component"]["components"] = [{"bom-ref": root + " bin-target-0"}]
+    return doc
+
+
+# A single crate, with its own build-dependency (scoped 'excluded') and
+# a dependency's build-dependency further down.
+SINGLE_ENTRIES = [
+    (C_CHRONO, "required"),
+    (C_SMALLVEC, "required"),
+    (C_SEMVER, "required"),
+    (C_TIME, "required"),
+    (C_NUMTRAITS, "required"),
+    (C_VCHECK, "excluded"),
+    (C_AUTOCFG, "excluded"),
+]
+SINGLE_GRAPH = {
+    C_APP: [C_CHRONO, C_SEMVER, C_SMALLVEC, C_VCHECK],
+    C_CHRONO: [C_NUMTRAITS, C_TIME],
+    C_NUMTRAITS: [C_AUTOCFG],
+    C_TIME: [],
+    C_SMALLVEC: [],
+    C_SEMVER: [],
+    C_VCHECK: [],
+    C_AUTOCFG: [],
+}
+SINGLE = cargo_document(C_APP, SINGLE_ENTRIES, SINGLE_GRAPH)
+classes, source = classify_document(SINGLE)
+check("source is the graph", source == SOURCE_GRAPH, source)
+check(
+    "a crate's declared dependencies are direct",
+    classes.get(C_SMALLVEC) == DIRECT and classes.get(C_CHRONO) == DIRECT,
+    classes,
+)
+check(
+    "what they pull in is transitive",
+    classes.get(C_TIME) == TRANSITIVE,
+    classes,
+)
+check(
+    "a build-dependency the crate declares is direct",
+    classes.get(C_VCHECK) == DIRECT,
+    classes,
+)
+check(
+    "a dependency's own build-dependency is transitive",
+    classes.get(C_AUTOCFG) == TRANSITIVE,
+    classes,
+)
+
+# The regression case: sbom-action given one member passes through
+# cargo-cyclonedx's own document, where the sibling member is scoped
+# 'required' like any crate. One hop from the root reaches 'core' but
+# not what 'core' declares, so without the package-ID rule smallvec's
+# Critical would stop gating.
+MEMBER_GRAPH = {
+    C_CLI: [C_CORE, C_SEMVER],
+    C_CORE: [C_CHRONO, C_SMALLVEC],
+    C_CHRONO: [C_TIME],
+    C_SMALLVEC: [],
+    C_SEMVER: [],
+    C_TIME: [],
+}
+MEMBER = cargo_document(
+    C_CLI,
+    [
+        (C_CORE, "required"),
+        (C_SEMVER, "required"),
+        (C_CHRONO, "required"),
+        (C_SMALLVEC, "required"),
+        (C_TIME, "required"),
+    ],
+    MEMBER_GRAPH,
+    member_purls={C_CORE: "pkg:cargo/core@0.1.0?download_url=file://../core"},
+)
+classes, source = classify_document(MEMBER)
+check(
+    "a sibling member stays part of the project",
+    classes.get(C_CORE) == DIRECT,
+    classes,
+)
+check(
+    "what a sibling member declares is direct",
+    classes.get(C_SMALLVEC) == DIRECT and classes.get(C_CHRONO) == DIRECT,
+    classes,
+)
+check(
+    "and what that pulls in is transitive",
+    classes.get(C_TIME) == TRANSITIVE,
+    classes,
+)
+
+# sbom-action given the whole workspace merges the member documents:
+# the root is the workspace, with no purl, no scope and no edges, and
+# the members lose their scope.
+MERGED = cargo_document(
+    C_ROOT,
+    [
+        (C_CORE, None),
+        (C_CLI, None),
+        (C_SEMVER, "required"),
+        (C_CHRONO, "required"),
+        (C_SMALLVEC, "required"),
+        (C_TIME, "required"),
+    ],
+    {C_ROOT: [], **MEMBER_GRAPH},
+    member_purls={
+        C_CORE: "pkg:cargo/core@0.1.0?download_url=file://.",
+        C_CLI: "pkg:cargo/cli@0.1.0?download_url=file://.",
+    },
+)
+MERGED["metadata"]["component"] = {"type": "library", "bom-ref": C_ROOT, "name": "ws"}
+# sbom-action's root has no edges; a root depending on its members
+# must classify the same way.
+LINKED = json.loads(json.dumps(MERGED))
+for entry in LINKED["dependencies"]:
+    if entry["ref"] == C_ROOT:
+        entry["dependsOn"] = [C_CORE, C_CLI]
+for label, doc in (("with no root edges", MERGED), ("with root edges", LINKED)):
+    classes, source = classify_document(doc)
+    check(
+        f"a merged workspace {label} classifies through its members",
+        source == SOURCE_GRAPH
+        and classes.get(C_SMALLVEC) == DIRECT
+        and classes.get(C_TIME) == TRANSITIVE,
+        classes,
+    )
+
+# Every remote source cargo names counts as third-party.
+for label, prefix in (
+    ("a sparse registry", "sparse+https://index.example/#"),
+    ("a git source", "git+https://example.com/repo?rev=abc#"),
+):
+    remote = prefix + "remote@1.0.0"
+    doc = cargo_document(
+        C_APP,
+        [(C_SMALLVEC, "required"), (remote, "required")],
+        {C_APP: [C_SMALLVEC], C_SMALLVEC: [remote], remote: []},
+    )
+    check(
+        f"a crate from {label} is third-party",
+        classify_document(doc)[0].get(remote) == TRANSITIVE,
+    )
+
+# A prefix the rule does not recognise counts as part of the project,
+# which can only make its dependencies direct: stricter, never looser.
+odd = "vendored+file:///somewhere#odd@1.0.0"
+doc = cargo_document(
+    C_APP,
+    [(odd, "required"), (C_SMALLVEC, "required")],
+    {C_APP: [odd], odd: [C_SMALLVEC], C_SMALLVEC: []},
+)
+check(
+    "an unrecognised source counts as project, so its dependencies gate",
+    classify_document(doc)[0].get(C_SMALLVEC) == DIRECT,
+)
+
+# Measured: a crate with no dependencies lists only its own ref, with
+# no dependsOn at all.
+lone = "path+file:///work/lone#lone@0.1.0"
+lone_doc = cargo_document(lone, [], {})
+lone_doc["dependencies"] = [{"ref": lone}]
+classes, source = classify_document(lone_doc)
+check(
+    "a crate with no dependencies has nothing to classify",
+    source == SOURCE_NONE,
+    classes,
+)
+
+classes, source = classify_document(
+    cargo_document(C_APP, SINGLE_ENTRIES, SINGLE_GRAPH, spec="1.3")
+)
+check(
+    "schema 1.3, cargo-cyclonedx's own default, is refused",
+    source == SOURCE_NONE and not classes,
+    classes,
+)
+
+# A Cargo document with no root cannot be anchored, and is refused.
+# Exclusivity itself is pinned by the sibling-member case above: drop
+# the Cargo branch and the document reaches the other rules, which stop
+# at the sibling and downgrade smallvec. Falling through only when this
+# rule refuses would change nothing, since every rule needs a root.
+rootless = json.loads(json.dumps(SINGLE))
+del rootless["metadata"]["component"]
+classes, source = classify_document(rootless)
+check(
+    "a Cargo document with no root is refused",
+    source == SOURCE_NONE and not classes,
+    classes,
+)
+
+# Findings can join by purl when Grype reports no artifact.id.
+provenance = build(written(json.dumps(MEMBER)), "", "sbom-graph")
+check(
+    "a registry crate joins by purl",
+    provenance.classify({"purl": "pkg:cargo/time@0.1.45"}) == TRANSITIVE,
+    provenance.by_purl,
+)
+check(
+    "a path crate's purl, with its download_url, joins as project",
+    (provenance.by_purl or {}).get("pkg:cargo/core@0.1.0?download_url=file://../core")
+    == DIRECT,
+    provenance.by_purl,
 )
 
 print("the document must say it is CycloneDX")

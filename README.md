@@ -260,15 +260,16 @@ CycloneDX records the dependency graph, and Grype preserves each
 component's `bom-ref` as `artifact.id` — so the graph arrives inside
 the SBOM this action already scans. No checkout, no extra job wiring.
 
-Three document shapes classify, all measured against real generators:
+Four document shapes classify, all measured against real generators:
 
 <!-- markdownlint-disable MD013 -->
 
-| Shape        | Producer                           | Anchor                                            |
-| ------------ | ---------------------------------- | ------------------------------------------------- |
-| Single root  | `cyclonedx-py --pyproject`         | `metadata.component` and its `dependsOn`          |
-| Reactor      | `cyclonedx-maven makeAggregateBom` | the unscoped module components                    |
-| Gradle build | `cyclonedx-gradle-plugin` 2.2.0+   | components marked with a `project_path` qualifier |
+| Shape        | Producer                           | Anchor                                               |
+| ------------ | ---------------------------------- | ---------------------------------------------------- |
+| Single root  | `cyclonedx-py --pyproject`         | `metadata.component` and its `dependsOn`             |
+| Reactor      | `cyclonedx-maven makeAggregateBom` | the unscoped module components                       |
+| Gradle build | `cyclonedx-gradle-plugin` 2.2.0+   | components marked with a `project_path` qualifier    |
+| Cargo        | `cargo-cyclonedx`                  | the root plus every package not from a remote source |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -279,8 +280,8 @@ dependency is a third-party package or a module of the project, and it
 leaves `scope` optional throughout — read either signal from an
 unmeasured producer and a declared package can be mistaken for an
 inherited one, which is the direction that loses the gate. Adding a
-generator means measuring its output first; Gradle shows why that is
-not a formality, since its shape fits neither of the other rules.
+generator means measuring its output first; Gradle and Cargo show why
+that is not a formality, since neither fits the other rules.
 
 The reactor case needs the extra care. The aggregator names itself in
 `metadata.component` but depends on nothing, and a module that a
@@ -298,15 +299,35 @@ It does mark every project in the build with a `project_path` purl
 qualifier, taken from Gradle's own `ProjectComponentIdentifier`, which
 an external module structurally cannot carry. The rule engages only
 when the root carries that marker, which plugins before 2.2.0 never
-emit, so an older document is refused rather than misread. The rule is exclusive
-too: another rule never sees a Gradle document that fails this one.
+emit, so an older document is refused rather than misread. The rule is
+exclusive too: another rule never sees a Gradle document that fails
+this one.
+
+Cargo does not fit them either. `cargo-cyclonedx` scopes every component,
+workspace members included, so scope cannot separate them, and one hop
+from the root reaches a sibling member without reaching what that
+sibling declares. Its `bom-ref` is cargo's own package ID, though,
+which spells out the package's source: crates fetched from elsewhere
+begin `registry+`, `sparse+` or `git+`, while a workspace member or
+path crate begins `path+file://`. Everything not positively remote
+counts as the project, so an unrecognised source can only make the
+gate stricter. That covers both shapes `sbom-action` emits: a single
+package, and a merged workspace whose root has no edges of its own.
+The rule is exclusive in the same way as Gradle's.
+
+Two Cargo facts are worth knowing. `cargo-cyclonedx` never records
+dev-dependencies at all, so they are neither scanned nor classified;
+build-dependencies appear when `sbom-action`'s `include_dev` is set,
+and classify like any other dependency. And its own default schema,
+1.3, is refused: the document resolves to no classifier, so every
+finding gates. Request 1.4 or 1.5; `sbom-action` uses 1.5.
 
 The graph is read from **CycloneDX JSON only**, at schema versions
 1.4, 1.5 and 1.6, which is where every supported producer was measured
-to classify identically. An XML SBOM carries the same graph but needs a
-separate parser, so it resolves to no classifier and every finding
-stays declared. Where `sbom_format` is `xml`, request `both` to get the
-benefit.
+to classify identically (`cargo-cyclonedx` stops at 1.5). An XML SBOM
+carries the same graph but needs a separate parser, so it resolves to
+no classifier and every finding stays declared. Where `sbom_format` is
+`xml`, request `both` to get the benefit.
 
 Where the graph cannot answer — Syft emits none at all for Go, and
 `cyclonedx-py` leaves a lock-file project's graph unrooted — supply the

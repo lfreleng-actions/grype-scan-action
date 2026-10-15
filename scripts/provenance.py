@@ -56,15 +56,18 @@ AUTO = "auto"
 MEASURED_GENERATORS = frozenset(
     {
         "CycloneDX Maven plugin",
+        "cargo-cyclonedx",
         "cyclonedx-gradle-plugin",
         "cyclonedx-maven-plugin",
         "cyclonedx-py",
     }
 )
 
-# The schema versions at which every generator above was measured to
-# classify identically. A version outside this set, or a malformed
-# one, is refused rather than assumed to share the shape.
+# The schema versions measured to classify identically, for every
+# generator above that can emit them (cargo-cyclonedx stops at 1.5). A
+# version outside this set, or a malformed one, is refused rather than
+# assumed to share the shape. 1.3 is absent because only cargo-cyclonedx
+# was measured there, and this set applies to every generator.
 MEASURED_SPEC_VERSIONS = frozenset({"1.4", "1.5", "1.6"})
 
 # Of those, the generators that mark third-party components with a
@@ -78,6 +81,13 @@ REACTOR_GENERATORS = frozenset({"CycloneDX Maven plugin", "cyclonedx-maven-plugi
 # first appears, through 3.4.1 and master. 1.x and 2.0-2.1 never emit
 # it, which the rule detects rather than assumes.
 GRADLE_GENERATORS = frozenset({"cyclonedx-gradle-plugin"})
+
+# Of those, the generators whose bom-ref is cargo's own package ID.
+# Cargo spells a package's source into that ID, so a crate fetched from
+# a registry or repository is told apart from a workspace member or
+# path crate without any CycloneDX convention at all.
+CARGO_GENERATORS = frozenset({"cargo-cyclonedx"})
+CARGO_REMOTE_SOURCES = ("registry+", "sparse+", "git+")
 
 
 def _gradle_project_refs(doc: dict) -> set[str]:
@@ -94,8 +104,7 @@ def _gradle_project_refs(doc: dict) -> set[str]:
     which proves the document uses it: plugins before 2.2.0 never emit
     it, and without it every module would look like a third-party
     library and what each one declares would look inherited. A blank
-    marker
-    anywhere is malformed, and refuses the document outright.
+    marker anywhere is malformed, and refuses the document outright.
     """
     root = root_component(doc)
     root_ref = identifier(root.get("bom-ref"))
@@ -115,10 +124,37 @@ def _gradle_project_refs(doc: dict) -> set[str]:
     return refs
 
 
+def _cargo_project_refs(doc: dict) -> set[str]:
+    """Packages in a Cargo workspace, identified by their package ID.
+
+    cargo-cyclonedx scopes every component, workspace members included,
+    so scope cannot separate them, and one hop from the root reaches a
+    sibling member without reaching what that sibling declares. Its
+    bom-ref is cargo's package ID, though, which names the package's
+    source: crates fetched from elsewhere begin 'registry+', 'sparse+'
+    or 'git+', while a member or path crate begins 'path+file://'.
+
+    Everything not positively remote counts as the project. That errs
+    one way only: promoting a reference makes its dependencies direct,
+    so an unrecognised prefix can tighten the gate, never loosen it.
+    The rule covers both shapes sbom-action emits, a single package and
+    a merged workspace whose root has no edges of its own.
+    """
+    root = identifier(root_component(doc).get("bom-ref"))
+    if not root:
+        return set()
+    refs = {root}
+    for component in components(doc):
+        ref = identifier(component.get("bom-ref"))
+        if ref and not ref.startswith(CARGO_REMOTE_SOURCES):
+            refs.add(ref)
+    return refs
+
+
 def _project_refs(doc: dict, graph: dict[str, list[str]]) -> set[str]:
     """References describing the project rather than a dependency.
 
-    Three shapes occur in practice, all measured against real output:
+    Four shapes occur in practice, all measured against real output:
 
     * A single root. ``cyclonedx-py --pyproject`` names the project in
       ``metadata.component`` and hangs the declared set off it.
@@ -131,6 +167,9 @@ def _project_refs(doc: dict, graph: dict[str, list[str]]) -> set[str]:
       exclusive: a Gradle document that fails its checks is refused
       rather than offered to the single-root rule, which would read
       every subproject as a third-party library.
+    * A Cargo package or workspace, handled by ``_cargo_project_refs``
+      and exclusive in the same way: the reactor rule would refuse it,
+      and the single-root rule would stop at a sibling member.
 
     ``scope`` separates the reactor case: cyclonedx-maven marks
     third-party components 'required' and leaves modules unscoped.
@@ -144,6 +183,8 @@ def _project_refs(doc: dict, graph: dict[str, list[str]]) -> set[str]:
     """
     if GRADLE_GENERATORS & generators(doc):
         return _gradle_project_refs(doc)
+    if CARGO_GENERATORS & generators(doc):
+        return _cargo_project_refs(doc)
 
     root = identifier(root_component(doc).get("bom-ref"))
     if not root:
