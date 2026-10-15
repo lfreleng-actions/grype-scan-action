@@ -94,8 +94,7 @@ def _gradle_project_refs(doc: dict) -> set[str]:
     which proves the document uses it: plugins before 2.2.0 never emit
     it, and without it every module would look like a third-party
     library and what each one declares would look inherited. A blank
-    marker
-    anywhere is malformed, and refuses the document outright.
+    marker anywhere is malformed, and refuses the document outright.
     """
     root = root_component(doc)
     root_ref = identifier(root.get("bom-ref"))

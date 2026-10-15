@@ -298,8 +298,9 @@ It does mark every project in the build with a `project_path` purl
 qualifier, taken from Gradle's own `ProjectComponentIdentifier`, which
 an external module structurally cannot carry. The rule engages only
 when the root carries that marker, which plugins before 2.2.0 never
-emit, so an older document is refused rather than misread. The rule is exclusive
-too: another rule never sees a Gradle document that fails this one.
+emit, so an older document is refused rather than misread. The rule is
+exclusive too: another rule never sees a Gradle document that fails
+this one.
 
 The graph is read from **CycloneDX JSON only**, at schema versions
 1.4, 1.5 and 1.6, which is where every supported producer was measured
