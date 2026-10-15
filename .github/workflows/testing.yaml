@@ -632,6 +632,84 @@ jobs:
           fi
           echo "Default policy gated every finding ✅"
 
+      # --- provenance: a Cargo workspace member --------------------
+      # cargo-cyclonedx scopes every component, sibling members
+      # included, so this is the shape that needs the package-ID rule:
+      # 'cli' depends on its sibling 'core', which declares smallvec.
+      # One hop from the root would reach core but not smallvec, and a
+      # Critical would stop gating. Built with jq, as the package IDs
+      # outrun the line limit.
+      - name: "Write a cargo-cyclonedx workspace-member SBOM"
+        shell: bash
+        run: |
+          # smallvec 1.6.0 reports a Critical and is declared by core;
+          # time 0.1.45 reports a Medium and arrives through chrono
+          set -euo pipefail
+          reg='registry+https://github.com/rust-lang/crates.io-index#'
+          jq -n --arg reg "${reg}" '
+            def crate($n; $v): {"bom-ref": ($reg + $n + "@" + $v),
+              type: "library", name: $n, version: $v,
+              scope: "required", purl: ("pkg:cargo/" + $n + "@" + $v)};
+            ("path+file:///work/ws/cli#0.1.0") as $cli
+            | ("path+file:///work/ws/core#0.1.0") as $core
+            | ($reg + "smallvec@1.6.0") as $smallvec
+            | ($reg + "chrono@0.4.19") as $chrono
+            | ($reg + "time@0.1.45") as $time
+            | {bomFormat: "CycloneDX", specVersion: "1.5", version: 1,
+              metadata: {
+                tools: [{vendor: "CycloneDX", name: "cargo-cyclonedx"}],
+                component: {"bom-ref": $cli, type: "application",
+                  name: "cli", version: "0.1.0", scope: "required"}},
+              components: [
+                {"bom-ref": $core, type: "library", name: "core",
+                  version: "0.1.0", scope: "required",
+                  purl: "pkg:cargo/core@0.1.0?download_url=file://../core"},
+                crate("smallvec"; "1.6.0"), crate("chrono"; "0.4.19"),
+                crate("time"; "0.1.45")],
+              dependencies: [
+                {ref: $cli, dependsOn: [$core]},
+                {ref: $core, dependsOn: [$chrono, $smallvec]},
+                {ref: $chrono, dependsOn: [$time]},
+                {ref: $smallvec}, {ref: $time}]}' > cargo-member.json
+
+      - name: "Scan the Cargo member with dependency-policy declared"
+        id: cargo_member
+        continue-on-error: true
+        uses: $/
+        with:
+          sbom: "cargo-member.json"
+          fail-on: "medium"
+          dependency-policy: "declared"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate a sibling's declaration gates"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.cargo_member.outcome }}
+          GATING: ${{ steps.cargo_member.outputs.gating-matches }}
+          ADVISORY: ${{ steps.cargo_member.outputs.advisory-matches }}
+          SOURCE: ${{ steps.cargo_member.outputs.provenance-source }}
+        run: |
+          # smallvec must gate although only the sibling declares it,
+          # and time must warn, with the graph doing the classifying
+          set -euo pipefail
+          echo "gating=${GATING} advisory=${ADVISORY} source=${SOURCE}"
+          if ! printf '%s' "${SOURCE}" | jq -e \
+            'to_entries | all(.value == "sbom-graph")' > /dev/null; then
+            echo "Expected the SBOM graph to classify findings ❌"
+            exit 1
+          fi
+          if [ "${OUTCOME}" != "failure" ] || [ "${GATING}" -lt 1 ]; then
+            echo "Expected the sibling's Critical to gate ❌"
+            exit 1
+          fi
+          if [ "${ADVISORY}" -lt 1 ]; then
+            echo "Expected the inherited Medium to warn ❌"
+            exit 1
+          fi
+          echo "Sibling declaration gated, inheritance warned ✅"
+
   ### Unit tests for the report evaluation ###
       # The cache is unavailable to a plain `act`-style run but present
       # in CI, so these exercise the mode end to end rather than just

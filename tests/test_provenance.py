@@ -496,30 +496,26 @@ SINGLE_GRAPH = {
 }
 SINGLE = cargo_document(C_APP, SINGLE_ENTRIES, SINGLE_GRAPH)
 classes, source = classify_document(SINGLE)
-check("source is the graph", source == SOURCE_GRAPH, source, expect_fail=True)
+check("source is the graph", source == SOURCE_GRAPH, source)
 check(
     "a crate's declared dependencies are direct",
     classes.get(C_SMALLVEC) == DIRECT and classes.get(C_CHRONO) == DIRECT,
     classes,
-    expect_fail=True,
 )
 check(
     "what they pull in is transitive",
     classes.get(C_TIME) == TRANSITIVE,
     classes,
-    expect_fail=True,
 )
 check(
     "a build-dependency the crate declares is direct",
     classes.get(C_VCHECK) == DIRECT,
     classes,
-    expect_fail=True,
 )
 check(
     "a dependency's own build-dependency is transitive",
     classes.get(C_AUTOCFG) == TRANSITIVE,
     classes,
-    expect_fail=True,
 )
 
 # The regression case: sbom-action given one member passes through
@@ -552,19 +548,16 @@ check(
     "a sibling member stays part of the project",
     classes.get(C_CORE) == DIRECT,
     classes,
-    expect_fail=True,
 )
 check(
     "what a sibling member declares is direct",
     classes.get(C_SMALLVEC) == DIRECT and classes.get(C_CHRONO) == DIRECT,
     classes,
-    expect_fail=True,
 )
 check(
     "and what that pulls in is transitive",
     classes.get(C_TIME) == TRANSITIVE,
     classes,
-    expect_fail=True,
 )
 
 # sbom-action given the whole workspace merges the member documents:
@@ -601,7 +594,6 @@ for label, doc in (("with no root edges", MERGED), ("with root edges", LINKED)):
         and classes.get(C_SMALLVEC) == DIRECT
         and classes.get(C_TIME) == TRANSITIVE,
         classes,
-        expect_fail=True,
     )
 
 # Every remote source cargo names counts as third-party.
@@ -618,7 +610,6 @@ for label, prefix in (
     check(
         f"a crate from {label} is third-party",
         classify_document(doc)[0].get(remote) == TRANSITIVE,
-        expect_fail=True,
     )
 
 # A prefix the rule does not recognise counts as part of the project,
@@ -632,7 +623,6 @@ doc = cargo_document(
 check(
     "an unrecognised source counts as project, so its dependencies gate",
     classify_document(doc)[0].get(C_SMALLVEC) == DIRECT,
-    expect_fail=True,
 )
 
 # Measured: a crate with no dependencies lists only its own ref, with
@@ -676,14 +666,12 @@ check(
     "a registry crate joins by purl",
     provenance.classify({"purl": "pkg:cargo/time@0.1.45"}) == TRANSITIVE,
     provenance.by_purl,
-    expect_fail=True,
 )
 check(
     "a path crate's purl, with its download_url, joins as project",
     (provenance.by_purl or {}).get("pkg:cargo/core@0.1.0?download_url=file://../core")
     == DIRECT,
     provenance.by_purl,
-    expect_fail=True,
 )
 
 print("the document must say it is CycloneDX")
