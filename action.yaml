@@ -91,6 +91,26 @@ inputs:
       glob, so it may safely share the SBOM's naming pattern.
     required: false
     default: ""
+  remediation-window-days:
+    description: >
+      Bounds the leniency of an unarmed run in time. Where gate-when is
+      'dependencies-changed' and the change left the dependency chain
+      alone, a finding stays a warning for this many days after its
+      fix became available, then gates as in an armed run. A finding
+      with no fix never gates this way, and a fixed finding with no
+      fix date gates at once unless remediation-window-start is set.
+      A whole number of days; empty turns the window off. Every other
+      run is unaffected.
+    required: false
+    default: ""
+  remediation-window-start:
+    description: >
+      Optional YYYY-MM-DD floor for the remediation window clock, which
+      starts at the later of the fix date and this date. Set it to the
+      day the window is adopted so an existing backlog gets the full
+      window rather than gating at once. Must not be in the future.
+    required: false
+    default: ""
   dependency-policy:
     description: >
       Which findings gate. 'all' gates every qualifying finding, the
@@ -352,9 +372,9 @@ outputs:
   gate-active:
     description: >
       'true' when a qualifying finding could block this run. False
-      whenever the dependency-change signal withheld the gate or
-      fail-on is 'none'. permit-fail is applied after evaluation and
-      is not reflected here.
+      whenever the dependency-change signal withheld the gate and no
+      remediation window is set, or fail-on is 'none'. permit-fail is
+      applied after evaluation and is not reflected here.
     value: ${{ steps.evaluate.outputs.gate-active }}
   gate-reason:
     description: >
@@ -363,6 +383,16 @@ outputs:
       the outcome: gating, gating-matches, advisory-matches and
       bypassed-matches describe what the run actually did.
     value: ${{ steps.evaluate.outputs.gate-reason }}
+  window-matches:
+    description: >
+      Matches reported as warnings only because their remediation
+      window is still open; each gates from its own deadline
+    value: ${{ steps.evaluate.outputs.window-matches }}
+  window-next-deadline:
+    description: >
+      Earliest YYYY-MM-DD date from which an in-window match gates;
+      empty when there is none
+    value: ${{ steps.evaluate.outputs.window-next-deadline }}
   bypassed-matches:
     description: "Matches suppressed by an approved bypass"
     value: ${{ steps.evaluate.outputs.bypassed-matches }}
@@ -391,6 +421,8 @@ runs:
         INPUT_DEPENDENCY_POLICY: ${{ inputs.dependency-policy }}
         INPUT_TRANSITIVE_FAIL_ON: ${{ inputs.transitive-fail-on }}
         INPUT_DECLARED_SOURCE: ${{ inputs.declared-source }}
+        INPUT_REMEDIATION_WINDOW_DAYS: ${{ inputs.remediation-window-days }}
+        INPUT_REMEDIATION_WINDOW_START: ${{ inputs.remediation-window-start }}
         INPUT_SORT_BY: ${{ inputs.sort-by }}
         INPUT_FORMATS: ${{ inputs.output-formats }}
         INPUT_PREFIX: ${{ inputs.output-prefix }}
@@ -550,6 +582,16 @@ runs:
             "got '${INPUT_BYPASS_REPO}'"
           exit 1
         fi
+
+        # Parsed by the same code the evaluate step uses, so the two
+        # cannot disagree on what a valid day count or date is. 'python3
+        # -m' puts the working directory first on sys.path, so run from
+        # the action's own directory: a 'scripts' package in the caller's
+        # workspace must not stand in for the validator.
+        (
+          cd "${GITHUB_ACTION_PATH}"
+          PYTHONPATH="${GITHUB_ACTION_PATH}" python3 -m scripts.window
+        )
 
         echo "Inputs validated ✅"
 
@@ -1130,6 +1172,8 @@ runs:
         INPUT_TRANSITIVE_FAIL_ON: ${{ inputs.transitive-fail-on }}
         INPUT_DECLARED_SOURCE: ${{ inputs.declared-source }}
         INPUT_DECLARED_DEPENDENCIES: ${{ inputs.declared-dependencies }}
+        INPUT_REMEDIATION_WINDOW_DAYS: ${{ inputs.remediation-window-days }}
+        INPUT_REMEDIATION_WINDOW_START: ${{ inputs.remediation-window-start }}
         BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
       run: |
         # Turn the JSON report(s) into a table, counts and a verdict.

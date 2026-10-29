@@ -507,6 +507,138 @@ jobs:
           esac
           echo "Unresolved change signal failed closed ✅"
 
+      # --- remediation window -------------------------------------
+      # The sidecar written above reports no dependency change, so
+      # without the window every finding would only warn. lodash
+      # 4.17.4's fixes are years old, so a 14-day window has closed.
+      - name: "Scan with an expired remediation window"
+        id: window_expired
+        continue-on-error: true
+        uses: $/
+        with:
+          sbom: "sbom-cyclonedx-app.json"
+          fail-on: "high"
+          gate-when: "dependencies-changed"
+          dependency-change-manifest: "sbom-cyclonedx-deps.json"
+          remediation-window-days: "14"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate an expired window gates an unarmed run"
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.window_expired.outcome }}
+          GATING: ${{ steps.window_expired.outputs.gating }}
+          MATCHES: ${{ steps.window_expired.outputs.gating-matches }}
+          ACTIVE: ${{ steps.window_expired.outputs.gate-active }}
+          WINDOW: ${{ steps.window_expired.outputs.window-matches }}
+        run: |
+          # Prove the step failed because findings gated, not because
+          # validation rejected the inputs before Grype ran
+          set -euo pipefail
+          echo "gating=${GATING} matches=${MATCHES} window=${WINDOW}"
+          for value in "${GATING}" "${MATCHES}" "${ACTIVE}" \
+            "${WINDOW}"; do
+            if [ -z "${value}" ]; then
+              echo "Expected the action to publish its outputs ❌"
+              exit 1
+            fi
+          done
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "Expected the expired window to fail the step ❌"
+            exit 1
+          fi
+          if [ "${GATING}" != "true" ] || [ "${ACTIVE}" != "true" ] \
+            || [ "${MATCHES}" -lt 1 ]; then
+            echo "Expected findings past their window to gate ❌"
+            exit 1
+          fi
+          echo "Expired remediation window gated ✅"
+
+      - name: "Compute today's and tomorrow's dates"
+        id: dates
+        shell: bash
+        run: |
+          # The window start must not be in the future, so the
+          # adoption case uses today and the rejection case tomorrow
+          set -euo pipefail
+          echo "today=$(date -u +%F)" >> "${GITHUB_OUTPUT}"
+          echo "tomorrow=$(date -u -d tomorrow +%F)" >> "${GITHUB_OUTPUT}"
+
+      - name: "Scan with a remediation window adopted today"
+        id: window_open
+        uses: $/
+        with:
+          sbom: "sbom-cyclonedx-app.json"
+          fail-on: "high"
+          gate-when: "dependencies-changed"
+          dependency-change-manifest: "sbom-cyclonedx-deps.json"
+          remediation-window-days: "3650"
+          remediation-window-start: ${{ steps.dates.outputs.today }}
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Validate the start date holds the backlog in its window"
+        shell: bash
+        env:
+          GATING: ${{ steps.window_open.outputs.gating }}
+          WINDOW: ${{ steps.window_open.outputs.window-matches }}
+          NEXT: ${{ steps.window_open.outputs.window-next-deadline }}
+        run: |
+          # Adopting the window must not gate the existing backlog
+          set -euo pipefail
+          echo "gating=${GATING} window=${WINDOW} next=${NEXT}"
+          if [ "${GATING}" != "false" ]; then
+            echo "Expected no gating inside the window ❌"
+            exit 1
+          fi
+          if [ "${WINDOW:-0}" -lt 1 ] || [ -z "${NEXT}" ]; then
+            echo "Expected in-window findings with a deadline ❌"
+            exit 1
+          fi
+          echo "Backlog held in its remediation window ✅"
+
+      - name: "Invalid remediation-window-days"
+        id: bad_window_days
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          # Nothing but validation may fail the step: no gate, no
+          # bypass lookup and no upload
+          fail-on: "none"
+          remediation-window-days: "-1"
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Error if invalid remediation-window-days did NOT fail"
+        if: steps.bad_window_days.outcome == 'success'
+        shell: bash
+        run: |
+          # A negative window is meaningless
+          echo "Error: invalid remediation-window-days was accepted ❌"
+          exit 1
+
+      - name: "Future remediation-window-start"
+        id: bad_window_start
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          fail-on: "none"
+          remediation-window-days: "14"
+          remediation-window-start: ${{ steps.dates.outputs.tomorrow }}
+          upload-artifact: "false"
+          bypass-enabled: "false"
+
+      - name: "Error if a future remediation-window-start did NOT fail"
+        if: steps.bad_window_start.outcome == 'success'
+        shell: bash
+        run: |
+          # A future start would stretch the window past its promise
+          echo "Error: future remediation-window-start was accepted ❌"
+          exit 1
+
       # --- provenance: gate what the project declared ------------
       # The reactor shape cyclonedx-maven emits, which is the one that
       # matters: 'core' is a project module carrying no scope, so it
@@ -827,3 +959,4 @@ jobs:
           python3 tests/test_collect_bypasses.py
           python3 tests/test_db_cache.py
           python3 tests/test_provenance.py
+          python3 tests/test_window.py

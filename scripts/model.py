@@ -6,9 +6,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 from dataclasses import dataclass, field
+
+from scripts.window import parse_days, parse_start, utc_today
 
 SEVERITY_ORDER = ["negligible", "low", "medium", "high", "critical"]
 
@@ -28,6 +31,7 @@ POLICY_DECLARED = "declared"
 ADVISORY_UNARMED = "unarmed"
 ADVISORY_INHERITED = "inherited"
 ADVISORY_UNFIXABLE = "unfixable"
+ADVISORY_IN_WINDOW = "in-window"
 SEVERITY_ICON = {
     "critical": "🔴",
     "high": "🟠",
@@ -219,6 +223,19 @@ class Settings:
     transitive_threshold: int | None
     declared_source: str
     declared_path: str
+    window_days: int | None = None
+    window_start: dt.date | None = None
+    today: dt.date = field(default_factory=utc_today)
+
+    @property
+    def window_applies(self) -> bool:
+        """Whether the remediation window can arm findings in this run.
+
+        Only an unarmed run has leniency to bound. Every run that gates
+        already, including one whose change signal failed closed, is
+        left exactly as it was.
+        """
+        return not self.gate_active and self.window_days is not None
 
     @property
     def policy_declared(self) -> bool:
@@ -231,10 +248,12 @@ class Settings:
 
         ``gate_active`` alone answers only the dependency-change
         question; a threshold of 'none' means nothing gates whatever
-        that signal said. ``permit-fail`` is applied later still, by
-        the verdict step, and is deliberately not modelled here.
+        that signal said. An unarmed run with a remediation window can
+        still block, on findings whose window has closed.
+        ``permit-fail`` is applied later still, by the verdict step,
+        and is deliberately not modelled here.
         """
-        return self.gate_active and self.threshold is not None
+        return (self.gate_active or self.window_applies) and self.threshold is not None
 
     @property
     def gate_reason(self) -> str:
@@ -246,6 +265,11 @@ class Settings:
         """
         if self.threshold is None:
             return "no severity threshold is configured"
+        if self.window_applies:
+            return (
+                f"{self.change_reason}; a finding gates once its fix has "
+                f"been available for {self.window_days} day(s)"
+            )
         return self.change_reason
 
     @property
@@ -302,6 +326,17 @@ class Settings:
             os.environ.get("INPUT_CHANGE_MANIFEST") or "",
         )
         transitive = (os.environ.get("INPUT_TRANSITIVE_FAIL_ON") or "none").lower()
+        today = utc_today()
+        try:
+            window_days = parse_days(os.environ.get("INPUT_REMEDIATION_WINDOW_DAYS"))
+            window_start = parse_start(
+                os.environ.get("INPUT_REMEDIATION_WINDOW_START"), today
+            )
+        except ValueError:
+            # The validate step rejects these first. Should one slip
+            # through, a zero-day window with no floor is the strictest
+            # reading: it can only arm findings, never excuse them.
+            window_days, window_start = 0, None
         return cls(
             fail_on=fail_on,
             threshold=severity_rank(fail_on) if fail_on != "none" else None,
@@ -325,4 +360,7 @@ class Settings:
             ),
             declared_source=(os.environ.get("INPUT_DECLARED_SOURCE") or "auto").lower(),
             declared_path=os.environ.get("INPUT_DECLARED_DEPENDENCIES") or "",
+            window_days=window_days,
+            window_start=window_start,
+            today=today,
         )
