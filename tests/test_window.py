@@ -22,6 +22,9 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+# The entry point the action uses: the helpers run through the launcher
+# under -I, as in action.yaml.
+LAUNCH = ROOT / "scripts" / "launch.py"
 sys.path.insert(0, str(ROOT))
 
 from scripts.evaluate import collect  # noqa: E402
@@ -353,11 +356,10 @@ with tempfile.TemporaryDirectory() as tmp:
             "INPUT_REMEDIATION_WINDOW_DAYS": "14",
             "GITHUB_OUTPUT": str(out_file),
             "GITHUB_STEP_SUMMARY": str(summary_file),
-            "PYTHONPATH": str(ROOT),
         }
     )
     result = subprocess.run(
-        [sys.executable, "-m", "scripts.evaluate"],
+        [sys.executable, "-I", str(LAUNCH), "evaluate"],
         cwd=str(ROOT),
         env=env,
         check=True,
@@ -410,7 +412,7 @@ with tempfile.TemporaryDirectory() as tmp:
         }
     )
     subprocess.run(
-        [sys.executable, "-m", "scripts.evaluate"],
+        [sys.executable, "-I", str(LAUNCH), "evaluate"],
         cwd=str(ROOT),
         env=env,
         check=True,
@@ -436,11 +438,10 @@ for label, days, start, code in (
         {
             "INPUT_REMEDIATION_WINDOW_DAYS": days,
             "INPUT_REMEDIATION_WINDOW_START": start,
-            "PYTHONPATH": str(ROOT),
         }
     )
     result = subprocess.run(
-        [sys.executable, "-m", "scripts.window"],
+        [sys.executable, "-I", str(LAUNCH), "window"],
         cwd=str(ROOT),
         env=env,
         capture_output=True,

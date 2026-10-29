@@ -109,9 +109,10 @@ def run(
         )
         env.update({k: str(v) for k, v in env_overrides.items()})
 
-        env["PYTHONPATH"] = str(ROOT)
+        # The entry point the action uses, so the output contract is
+        # checked through the launcher and under -I.
         result = subprocess.run(
-            [sys.executable, "-m", "scripts.evaluate"],
+            [sys.executable, "-I", str(ROOT / "scripts" / "launch.py"), "evaluate"],
             cwd=str(ROOT),
             env=env,
             check=True,

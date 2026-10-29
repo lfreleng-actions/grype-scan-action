@@ -584,14 +584,11 @@ runs:
         fi
 
         # Parsed by the same code the evaluate step uses, so the two
-        # cannot disagree on what a valid day count or date is. 'python3
-        # -m' puts the working directory first on sys.path, so run from
-        # the action's own directory: a 'scripts' package in the caller's
-        # workspace must not stand in for the validator.
-        (
-          cd "${GITHUB_ACTION_PATH}"
-          PYTHONPATH="${GITHUB_ACTION_PATH}" python3 -m scripts.window
-        )
+        # cannot disagree on what a valid day count or date is. -I keeps
+        # the workspace off the import path, so a 'scripts' package in
+        # the caller's workspace cannot stand in for the validator; see
+        # scripts/launch.py.
+        python3 -I "${GITHUB_ACTION_PATH}/scripts/launch.py" window
 
         echo "Inputs validated ✅"
 
@@ -735,7 +732,8 @@ runs:
                "POSIX path (${dir})" ;;
         esac
         canonical() {
-          python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"
+          python3 -I -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' \
+            "$1"
         }
         dir=$(canonical "${dir}")
         # The root has to be rejected on its own: the containment test
@@ -1149,7 +1147,10 @@ runs:
         # rate-limited API keeps the gate closed rather than opening
         # it silently.
         set -uo pipefail
-        PYTHONPATH="${GITHUB_ACTION_PATH}" python3 -m scripts.collect_bypasses
+        # -I keeps the workspace, which may hold an untrusted checkout,
+        # off the import path; launch.py binds the action's own
+        # helpers by path. See scripts/launch.py.
+        python3 -I "${GITHUB_ACTION_PATH}/scripts/launch.py" collect_bypasses
 
     - name: "Evaluate findings"
       id: evaluate
@@ -1178,7 +1179,8 @@ runs:
       run: |
         # Turn the JSON report(s) into a table, counts and a verdict.
         set -uo pipefail
-        PYTHONPATH="${GITHUB_ACTION_PATH}" python3 -m scripts.evaluate
+        # Isolated for the same reason as the bypass step above.
+        python3 -I "${GITHUB_ACTION_PATH}/scripts/launch.py" evaluate
 
     - name: "Upload reports"
       # yamllint disable-line rule:line-length

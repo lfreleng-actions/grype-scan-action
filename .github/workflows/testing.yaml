@@ -960,3 +960,4 @@ jobs:
           python3 tests/test_db_cache.py
           python3 tests/test_provenance.py
           python3 tests/test_window.py
+          python3 tests/test_isolation.py
