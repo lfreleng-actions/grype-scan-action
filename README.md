@@ -221,6 +221,57 @@ scheduled or default-branch scan with `gate-when: "always"`. Without
 one, findings accumulate with no owner, and the next maintainer to touch
 a dependency inherits the whole backlog at once.
 
+### Bounding the leniency with a remediation window
+
+Left alone, an unarmed run reports a finding as a warning for as long
+as nobody touches the dependencies. `remediation-window-days` puts a
+limit on that: in a run whose change left the dependency chain alone, a
+finding stays a warning for the configured number of days after its
+fix became available, and then gates. In effect, a finding gates when the change
+touched dependencies, **or** when a fix has been available for longer
+than the window.
+
+<!-- markdownlint-disable MD046 -->
+
+```yaml
+- uses: lfreleng-actions/grype-scan-action@<sha>
+  with:
+    sbom: 'sbom-cyclonedx.json'
+    gate-when: 'dependencies-changed'
+    dependencies-changed: ${{ needs.sbom.outputs.deps_changed }}
+    remediation-window-days: '14'
+    remediation-window-start: '2026-11-01'
+```
+
+<!-- markdownlint-enable MD046 -->
+
+Each finding's clock starts at the later of two dates: the earliest fix
+date Grype reports for it (`vulnerability.fix.available[].date`, of any
+kind), and `remediation-window-start` when set. Its deadline is that
+date plus the window, compared with the current UTC date. Set
+`remediation-window-start` to the day a project adopts the window, so
+its existing backlog gets the full window from then rather than gating
+at once; a date in the future fails the step.
+
+- **On or after the deadline** the finding is evaluated exactly as in
+  an armed run: `fail-on` or `transitive-fail-on` by provenance under
+  `dependency-policy`, `only-fixed`, and approved bypass issues all
+  apply unchanged.
+- **Before the deadline** the finding warns. The summary marks it "gates
+  from YYYY-MM-DD", an annotation names its deadline, and the
+  `window-matches` and `window-next-deadline` outputs count it.
+- **With no fix available** no clock starts, so the window never arms
+  the finding. `only-fixed` would not gate it either.
+- **With a fix but no fix date** the clock starts at
+  `remediation-window-start` when set; otherwise the finding gates at
+  once, since a missing date must not buy unlimited time.
+
+The window applies only where `gate-when` is `dependencies-changed` and
+the signal reports the dependencies unchanged. A run that gates already
+— dependencies changed, the signal unresolved, or `gate-when: always` —
+is unaffected, so setting the window can only add gating to a run,
+never remove it. The action leaves it off by default.
+
 ## Gating only what the project declared
 
 `dependency-policy: "declared"` gates findings in packages the project
@@ -459,6 +510,8 @@ Provide one of `sbom` or `target`, not both.
 | gate-when                  | always     | `always`, or `dependencies-changed` to warn on unrelated runs          |
 | dependencies-changed       | ""         | `true`, `false`, or empty to read the sidecar                          |
 | dependency-change-manifest | ""         | Path to a `{"changed": bool}` sidecar beside the SBOM                  |
+| remediation-window-days    | ""         | Days a fixable finding may warn in an unarmed run; empty is off        |
+| remediation-window-start   | ""         | `YYYY-MM-DD` floor for the window clock; not in the future             |
 | dependency-policy          | all        | `all`, or `declared` to warn on inherited packages                     |
 | transitive-fail-on         | none       | Severity at which an inherited package gates, independent of `fail-on` |
 | declared-source            | auto       | `auto`, `sbom-graph`, `file` or `none`                                 |
@@ -668,21 +721,23 @@ cost of a download per run.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name               | Description                                                |
-| ------------------ | ---------------------------------------------------------- |
-| gating             | "true" when findings gate the workflow                     |
-| total-matches      | Total matches across all scanned artefacts                 |
-| gating-matches     | Matches in the gating bucket; 0 when the gate is unarmed   |
-| advisory-matches   | Matches reported as warnings rather than blocking          |
-| direct-matches     | Matches in packages the project declares                   |
-| transitive-matches | Matches in packages the project inherited                  |
-| provenance-source  | JSON map of artefact to classifier: sbom-graph, file, none |
-| gate-active        | "true" when findings could block, before permit-fail       |
-| gate-reason        | Why the gate is or is not armed; policy, not outcome       |
-| bypassed-matches   | Matches suppressed by an approved bypass                   |
-| bypassed-ids       | Comma-separated vulnerability IDs bypassed                 |
-| severity-counts    | JSON object of counts by severity                          |
-| report-files       | Newline-separated list of report files written             |
+| Name                 | Description                                                |
+| -------------------- | ---------------------------------------------------------- |
+| gating               | "true" when findings gate the workflow                     |
+| total-matches        | Total matches across all scanned artefacts                 |
+| gating-matches       | Matches in the gating bucket; 0 when the gate is unarmed   |
+| advisory-matches     | Matches reported as warnings rather than blocking          |
+| direct-matches       | Matches in packages the project declares                   |
+| transitive-matches   | Matches in packages the project inherited                  |
+| provenance-source    | JSON map of artefact to classifier: sbom-graph, file, none |
+| gate-active          | "true" when findings could block, before permit-fail       |
+| gate-reason          | Why the gate is or is not armed; policy, not outcome       |
+| window-matches       | Matches warning only because their window is still open    |
+| window-next-deadline | Earliest date an in-window match gates; empty when none    |
+| bypassed-matches     | Matches suppressed by an approved bypass                   |
+| bypassed-ids         | Comma-separated vulnerability IDs bypassed                 |
+| severity-counts      | JSON object of counts by severity                          |
+| report-files         | Newline-separated list of report files written             |
 
 <!-- markdownlint-enable MD013 -->
 

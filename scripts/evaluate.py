@@ -18,6 +18,7 @@ import os
 import sys
 
 from scripts.model import (
+    ADVISORY_IN_WINDOW,
     ADVISORY_INHERITED,
     ADVISORY_UNARMED,
     ADVISORY_UNFIXABLE,
@@ -32,6 +33,7 @@ from scripts.model import (
 )
 from scripts.provenance import DIRECT, TRANSITIVE, build
 from scripts.render import write_summary
+from scripts.window import annotation, deadline, fix_date
 
 
 def load_manifest() -> list[tuple[str, str]]:
@@ -88,6 +90,7 @@ def build_row(match: dict) -> dict:
     fix = vulnerability.get("fix") or {}
     return {
         "fixable": bool(fix.get("versions")) or fix.get("state") == "fixed",
+        "fixed_on": fix_date(vulnerability),
         "package": artifact.get("name"),
         "version": artifact.get("version"),
         "type": artifact.get("type"),
@@ -171,14 +174,31 @@ def collect(settings: Settings, bypasses: dict[str, dict]) -> Report:
                 gates = False
                 warns = True
 
+            # The remediation window arms a finding in an otherwise
+            # unarmed run once its fix has been available long enough.
+            # It never disarms one: an armed run ignores it entirely.
+            armed = settings.gate_active
+            gates_from = None
+            if settings.window_applies and settings.window_days is not None:
+                gates_from = deadline(
+                    row["fixable"],
+                    row["fixed_on"],
+                    settings.window_days,
+                    settings.window_start,
+                )
+                armed = gates_from is not None and settings.today >= gates_from
+
             bypass = bypasses.get(str(row["id"]).upper())
             if bypass:
                 row["bypass"] = bypass
                 section.bypassed.append(row)
-            elif gates and settings.gate_active:
+            elif gates and armed:
                 section.gating.append(row)
             else:
-                if not settings.gate_active:
+                if not armed and gates and gates_from is not None:
+                    row["advisory_reason"] = ADVISORY_IN_WINDOW
+                    row["gates_from"] = gates_from.isoformat()
+                elif not armed:
                     row["advisory_reason"] = ADVISORY_UNARMED
                 elif demoted:
                     row["advisory_reason"] = ADVISORY_UNFIXABLE
@@ -207,6 +227,15 @@ def provenance_sources(report: Report) -> str:
     )
 
 
+def in_window(report: Report) -> list[dict]:
+    """Warnings held back only by the remediation window."""
+    return [
+        row
+        for row in report.advisory
+        if row.get("advisory_reason") == ADVISORY_IN_WINDOW
+    ]
+
+
 def write_outputs(report: Report, settings: Settings) -> None:
     """Publish the step outputs consumers act on."""
     emit("gating", "true" if report.gating else "false")
@@ -214,6 +243,12 @@ def write_outputs(report: Report, settings: Settings) -> None:
     emit("gating-matches", str(len(report.gating)))
     emit("advisory-matches", str(len(report.advisory)))
     emit("bypassed-matches", str(len(report.bypassed)))
+    window = in_window(report)
+    emit("window-matches", str(len(window)))
+    emit(
+        "window-next-deadline",
+        min((row["gates_from"] for row in window), default=""),
+    )
     emit("direct-matches", str(count_provenance(report, DIRECT)))
     emit("transitive-matches", str(count_provenance(report, TRANSITIVE)))
     emit("provenance-source", provenance_sources(report))
@@ -248,6 +283,13 @@ def main() -> int:
         )
     if not settings.gate_active:
         print(f"Findings do not block this run: {settings.gate_reason}")
+    for row in in_window(report):
+        print(
+            f"::warning::{annotation(row['id'])} in "
+            f"{annotation(row['package'])} {annotation(row['version'])} "
+            f"is within its remediation window and gates from "
+            f"{row['gates_from']}"
+        )
     return 0
 
 

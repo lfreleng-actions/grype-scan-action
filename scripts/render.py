@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 
 from scripts.model import (
+    ADVISORY_IN_WINDOW,
     ADVISORY_INHERITED,
     SEVERITY_ICON,
     Report,
@@ -75,7 +76,16 @@ def advisory_heading(rows: list[dict]) -> str:
     """
     if rows and all(row.get("advisory_reason") == ADVISORY_INHERITED for row in rows):
         return "Inherited dependencies; reported as warnings"
+    if rows and all(row.get("advisory_reason") == ADVISORY_IN_WINDOW for row in rows):
+        return "Within the remediation window; reported as warnings"
     return "Reported as warnings; not blocking this run"
+
+
+def fix_cell(row: dict) -> str:
+    """The fix, plus the date a finding in its window starts gating."""
+    if row.get("gates_from"):
+        return f"{row['fix']} (gates from {row['gates_from']})"
+    return str(row["fix"])
 
 
 def render_findings_table(rows: list[dict], max_rows: int) -> list[str]:
@@ -103,7 +113,7 @@ def render_findings_table(rows: list[dict], max_rows: int) -> list[str]:
                     cell(row["version"]),
                     cell(row["type"]),
                     cell(row["id"]),
-                    cell(row["fix"]),
+                    cell(fix_cell(row)),
                     cell(row["epss"]),
                     cell(row["risk"]),
                 ]
@@ -197,7 +207,17 @@ def render_summary(report: Report, settings: Settings) -> str:
         if section.bypassed:
             lines.extend(render_bypassed(section.bypassed))
 
-    if report.advisory and not settings.gate_active:
+    if report.advisory and settings.window_applies:
+        lines.extend(
+            [
+                "A change that touches the dependency chain re-arms "
+                "the gate, and a fixable finding gates on its own once "
+                "its remediation window closes, so these findings are "
+                "worth clearing before either happens.",
+                "",
+            ]
+        )
+    elif report.advisory and not settings.gate_active:
         lines.extend(
             [
                 "A change that touches the dependency chain re-arms "
