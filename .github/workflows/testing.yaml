@@ -44,13 +44,8 @@ jobs:
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: 'block'
-          # index.docker.io resolves image descriptors for the
-          # registry: targets these tests scan. The shared list carries
-          # registry-1.docker.io and auth.docker.io but not this one;
-          # requested for the shared list in lfreleng-actions/.github.
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
-            index.docker.io:443
 
       # --- a target with known, unfixable findings ----------------
       # alpine:3.10 is long out of support, so it reliably reports
@@ -814,13 +809,8 @@ jobs:
         uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: 'block'
-          # index.docker.io resolves image descriptors for the
-          # registry: targets these tests scan. The shared list carries
-          # registry-1.docker.io and auth.docker.io but not this one;
-          # requested for the shared list in lfreleng-actions/.github.
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
-            index.docker.io:443
 
       - name: "Checkout repository"
         # yamllint disable-line rule:line-length
