@@ -31,14 +31,20 @@ def match(
     risk: float | None = None,
     epss: float | None = None,
     ref: str | None = None,
+    state: str | None = None,
+    versions: list[str] | None = None,
 ) -> dict:
-    """Build a synthetic Grype match."""
+    """Build a synthetic Grype match.
+
+    ``fix`` is the shorthand: one version, state ``fixed``; None means
+    no fix. ``state`` and ``versions`` override each half on their own,
+    so a fix can carry a state without a version or vice versa.
+    """
     vulnerability: dict = {"id": vuln, "severity": severity}
-    vulnerability["fix"] = (
-        {"versions": [fix], "state": "fixed"}
-        if fix
-        else {"versions": [], "state": "not-fixed"}
-    )
+    vulnerability["fix"] = {
+        "versions": versions if versions is not None else ([fix] if fix else []),
+        "state": state if state is not None else ("fixed" if fix else "not-fixed"),
+    }
     if risk is not None:
         vulnerability["risk"] = risk
     if epss is not None:
@@ -628,6 +634,53 @@ check(
     "an inherited finding demoted by only-fixed is not labelled inherited",
     outputs["advisory-matches"] == "1" and "Inherited dependencies" not in summary,
     summary,
+)
+
+print("only-fixed requires a published fix version")
+# Grype emits state 'fixed' with no version when the upstream fix maps
+# to no release of this package. Nobody can bump to clear that, so the
+# state alone must not make a finding fixable.
+outputs, summary = run(
+    [match("a", "CVE-STATE-ONLY", "Critical", state="fixed", versions=[])],
+    INPUT_ONLY_FIXED="true",
+)
+check(
+    "state 'fixed' with no version is demoted to a warning",
+    outputs["gating-matches"] == "0" and outputs["advisory-matches"] == "1",
+    outputs,
+)
+check("and stays in the summary", "CVE-STATE-ONLY" in summary, summary)
+outputs, _ = run(
+    [match("a", "CVE-V", "Critical", state="fixed", versions=["1.2.3"])],
+    INPUT_ONLY_FIXED="true",
+)
+check("state 'fixed' with a version still gates", outputs["gating-matches"] == "1")
+outputs, _ = run(
+    [match("a", "CVE-NF", "Critical", state="not-fixed", versions=[])],
+    INPUT_ONLY_FIXED="true",
+)
+check(
+    "state 'not-fixed' with no version is demoted",
+    outputs["gating-matches"] == "0" and outputs["advisory-matches"] == "1",
+    outputs,
+)
+outputs, _ = run(
+    [match("a", "CVE-EMPTY", "Critical", state="fixed", versions=["", "  "])],
+    INPUT_ONLY_FIXED="true",
+)
+check(
+    "a version list holding only empty strings counts as no version",
+    outputs["gating-matches"] == "0" and outputs["advisory-matches"] == "1",
+    outputs,
+)
+outputs, _ = run(
+    [match("a", "CVE-STATE-ONLY", "Critical", state="fixed", versions=[])],
+    INPUT_ONLY_FIXED="false",
+)
+check(
+    "with only-fixed off, state 'fixed' with no version still gates",
+    outputs["gating-matches"] == "1",
+    outputs,
 )
 
 print("provenance fails closed")

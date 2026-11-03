@@ -263,6 +263,14 @@ _, report = evaluate(
 check("an unfixable finding never gates through the window", not report.gating)
 row = report.advisory[0] if report.advisory else {}
 check("it stays unarmed", row.get("advisory_reason") == ADVISORY_UNARMED, row)
+# A fix state of 'fixed' with no version is not a fix anyone can bump
+# to, so its date must not start a clock either, even an expired one.
+state_only = match("a", "CVE-STATE-ONLY", dates=["2026-01-01"])
+state_only["vulnerability"]["fix"]["versions"] = []
+_, report = evaluate([state_only], INPUT_REMEDIATION_WINDOW_DAYS="0")
+check("state 'fixed' with no version is not armed by the window", not report.gating)
+row = report.advisory[0] if report.advisory else {}
+check("and it stays unarmed", row.get("advisory_reason") == ADVISORY_UNARMED, row)
 
 print("rule 6: a fix with no date")
 _, report = evaluate([match("a", "CVE-NODATE")], **WINDOW)
