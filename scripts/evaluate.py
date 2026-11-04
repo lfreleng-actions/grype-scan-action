@@ -82,6 +82,22 @@ def sbom_path(artefact: str) -> str:
     return artefact[len(prefix) :] if artefact.startswith(prefix) else ""
 
 
+def has_fix_version(fix: object) -> bool:
+    """Whether a fix lists a published version to upgrade to.
+
+    The fix state alone does not count: Grype reports some advisories
+    as ``fixed`` with an empty version list when the upstream fix maps
+    to no release of this package, and nobody can bump to clear those.
+    Only a non-empty version string makes a finding fixable.
+    """
+    if not isinstance(fix, dict):
+        return False
+    versions = fix.get("versions")
+    if not isinstance(versions, list):
+        return False
+    return any(isinstance(version, str) and version.strip() for version in versions)
+
+
 def build_row(match: dict) -> dict:
     """Flatten a Grype match into the fields the table renders."""
     vulnerability = match.get("vulnerability", {}) or {}
@@ -89,7 +105,7 @@ def build_row(match: dict) -> dict:
     risk = vulnerability.get("risk")
     fix = vulnerability.get("fix") or {}
     return {
-        "fixable": bool(fix.get("versions")) or fix.get("state") == "fixed",
+        "fixable": has_fix_version(fix),
         "fixed_on": fix_date(vulnerability),
         "package": artifact.get("name"),
         "version": artifact.get("version"),

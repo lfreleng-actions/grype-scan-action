@@ -80,10 +80,14 @@ change](#gating-only-when-dependencies-change) instead.
 ### 1. Gate on what a bump can fix
 
 `only-fixed: "true"` reports every finding but gates those with a
-fix available. A finding that would otherwise gate but has no fix is
-listed as a warning and counted in `advisory-matches`; anything below
-the gating bars stays in the report as before. A CVE nobody can action
-stops blocking merges, while a missed dependency bump still fails.
+published fix version. A finding that would otherwise gate but lists
+no version to upgrade to is listed as a warning and counted in
+`advisory-matches`; anything below the gating bars stays in the report
+as before. A fix state of `fixed` with no version does not count: Grype
+reports some advisories that way when the upstream fix maps to no
+release of the package, and no bump can clear those. A CVE nobody can
+action stops blocking merges, while a missed dependency bump still
+fails.
 
 The action applies this itself rather than passing `--only-fixed` to
 Grype, which would drop unfixable findings from the report altogether.
@@ -466,7 +470,7 @@ Provide one of `sbom` or `target`, not both.
 | Name             | Default | Description                                                        |
 | ---------------- | ------- | ------------------------------------------------------------------ |
 | fail-on          | medium  | Lowest gating severity, or `none` to report without gating         |
-| only-fixed       | false   | Gate only on fixable findings; unfixable ones that would gate warn |
+| only-fixed       | false   | Gate only on findings with a published fix version; others warn    |
 | ignore-states    | ""      | Fix states to ignore: fixed, not-fixed, unknown, wont-fix          |
 | by-cve           | false   | Orient results by CVE rather than the original ID                  |
 | sort-by          | risk    | risk, severity, epss, kev, package or vulnerability                |

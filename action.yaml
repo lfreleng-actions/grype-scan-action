@@ -59,11 +59,13 @@ inputs:
     default: "medium"
   only-fixed:
     description: >
-      Gate only on vulnerabilities that have a fix available. A finding
-      that would otherwise gate but has no fix is reported as a warning
-      instead, so an unfixable advisory cannot block every pull request
-      until upstream ships a patch. Findings below the gating bars are
-      reported as before and are not counted as warnings.
+      Gate only on vulnerabilities with a published fix version. A
+      finding that would otherwise gate but lists no version to upgrade
+      to is reported as a warning instead, so an advisory nobody can
+      action cannot block every pull request until upstream ships a
+      patch. A fix state of 'fixed' without a version does not count.
+      Findings below the gating bars are reported as before and are not
+      counted as warnings.
     required: false
     default: "false"
   gate-when:
