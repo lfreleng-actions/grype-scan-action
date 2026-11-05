@@ -695,9 +695,20 @@ runs:
         echo "cache-db=${cache_db}" >> "${GITHUB_OUTPUT}"
 
     # Every step below carries this guard, the always() ones included.
-    - name: "Install Grype"
-      id: grype
+    #
+    # The upstream installer downloads once and does not retry, so a
+    # single dropped connection to the release-asset host fails the
+    # job. A composite action cannot retry a uses: step, so the
+    # install is unrolled into three attempts with 10 s and 30 s waits
+    # between them. Each later step tests the previous attempt's
+    # outcome, not its conclusion: under continue-on-error a failed
+    # attempt still concludes 'success'. The last attempt has no
+    # continue-on-error, so a third failure fails the action. Every
+    # attempt uses the same pin and the same inputs.
+    - name: "Install Grype (attempt 1)"
+      id: grype-1
       if: steps.validate.outputs.validate-only != 'true'
+      continue-on-error: true
       # yamllint disable-line rule:line-length
       uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
       with:
@@ -709,6 +720,85 @@ runs:
         # little more stale, fails to overwrite it, and keeps it alive
         # past normal eviction by reading it.
         cache-db: "false"
+
+    - name: "Wait before Grype install attempt 2"
+      if: >-
+        steps.validate.outputs.validate-only != 'true'
+        && steps.grype-1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "Grype install attempt 1 failed; retrying in 10 seconds"
+        sleep 10
+
+    - name: "Install Grype (attempt 2)"
+      id: grype-2
+      if: >-
+        steps.validate.outputs.validate-only != 'true'
+        && steps.grype-1.outcome == 'failure'
+      continue-on-error: true
+      # yamllint disable-line rule:line-length
+      uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+      with:
+        grype-version: ${{ inputs.grype-version }}
+        cache-db: "false"
+
+    - name: "Wait before Grype install attempt 3"
+      if: >-
+        steps.validate.outputs.validate-only != 'true'
+        && steps.grype-2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "Grype install attempt 2 failed; retrying in 30 seconds"
+        sleep 30
+
+    - name: "Install Grype (attempt 3)"
+      id: grype-3
+      if: >-
+        steps.validate.outputs.validate-only != 'true'
+        && steps.grype-2.outcome == 'failure'
+      # yamllint disable-line rule:line-length
+      uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
+      with:
+        grype-version: ${{ inputs.grype-version }}
+        cache-db: "false"
+
+    # Keeps the id every later step reads steps.grype.outputs.cmd from.
+    - name: "Resolve installed Grype"
+      id: grype
+      if: steps.validate.outputs.validate-only != 'true'
+      shell: bash
+      env:
+        OUTCOME_1: ${{ steps.grype-1.outcome }}
+        OUTCOME_2: ${{ steps.grype-2.outcome }}
+        OUTCOME_3: ${{ steps.grype-3.outcome }}
+        CMD_1: ${{ steps.grype-1.outputs.cmd }}
+        CMD_2: ${{ steps.grype-2.outputs.cmd }}
+        CMD_3: ${{ steps.grype-3.outputs.cmd }}
+      run: |
+        set -euo pipefail
+        attempt=""
+        cmd=""
+        if [ "${OUTCOME_1}" = "success" ]; then
+          attempt=1
+          cmd="${CMD_1}"
+        elif [ "${OUTCOME_2}" = "success" ]; then
+          attempt=2
+          cmd="${CMD_2}"
+        elif [ "${OUTCOME_3}" = "success" ]; then
+          attempt=3
+          cmd="${CMD_3}"
+        fi
+        if [ -z "${attempt}" ] || [ -z "${cmd}" ]; then
+          echo "::error::Grype could not be installed after 3 attempts"
+          exit 1
+        fi
+        if [ "${attempt}" != "1" ]; then
+          echo "::notice::Grype installed on attempt ${attempt} of 3;" \
+            "the 'Error installing grype' annotation above comes from" \
+            "an earlier attempt that failed and was retried"
+        fi
+        echo "Grype command: ${cmd}"
+        echo "cmd=${cmd}" >> "${GITHUB_OUTPUT}"
 
     - name: "Resolve Grype DB cache location"
       id: grype-db

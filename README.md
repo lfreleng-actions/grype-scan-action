@@ -518,6 +518,18 @@ may omit both.
 
 <!-- markdownlint-enable MD013 -->
 
+The action installs Grype with Anchore's pinned installer, which owns
+the default version when `grype-version` is empty, the checksum check
+and the OS and architecture mapping. The installer downloads once, so
+the action retries a failed install up to twice, waiting 10 seconds
+before the second attempt and 30 seconds before the third. A transient
+network failure then costs a short delay rather than the job. A
+failure that does not go away, such as a `grype-version` that does
+not exist or a blocked endpoint, still fails the action, about 40
+seconds later than it would without the retry. A run that recovers
+keeps the installer's `Error installing grype` annotation from the
+failed attempt, and a notice names the attempt that succeeded.
+
 ### Reporting
 
 <!-- markdownlint-disable MD013 -->
