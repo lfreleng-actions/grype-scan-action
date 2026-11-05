@@ -444,6 +444,35 @@ missing file.
 Dependency provenance follows the same rule: anything that cannot be
 classified counts as declared, and gates.
 
+## Validating inputs early
+
+A workflow that scans after a build can still fail on a typo in its
+`grype_*` inputs within seconds, by running this action in its early
+validation job with `validate-only: 'true'` and the same `with:` block
+it passes the real scan:
+
+```yaml
+- name: 'Validate Grype inputs'
+  uses: lfreleng-actions/grype-scan-action@<sha>
+  with:
+    validate-only: 'true'
+    fail-on: ${{ inputs.grype_fail_on }}
+    gate-when: ${{ inputs.grype_gate_when }}
+    dependency-policy: ${{ inputs.grype_dependency_policy }}
+    transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+    remediation-window-days: ${{ inputs.grype_remediation_window_days }}
+    remediation-window-start: ${{ inputs.grype_remediation_window_start }}
+    bypass-repository: ${{ inputs.grype_bypass_repository }}
+```
+
+The step runs the checks a real scan runs, with one exception: it
+needs neither `sbom` nor `target`, though passing both is still an
+error. It then stops. It installs no Grype, fetches no database, scans
+nothing, reads no bypass issues and makes no network request. A pass
+sets the `validated` output to `true`; every other output stays empty.
+Because the checks are the action's own, a validation job using this
+mode cannot drift from what the scan accepts.
+
 ## Inputs
 
 <!-- markdownlint-disable MD013 -->
@@ -458,10 +487,12 @@ classified counts as declared, and gates.
 | fail-on-missing-sbom | true    | Fail when the pattern matches no file                       |
 | target               | ""      | Grype target reference, used instead of `sbom`              |
 | name                 | ""      | Label for this scan in the summary and annotations          |
+| validate-only        | false   | Check the inputs, then stop; see above                      |
 
 <!-- markdownlint-enable MD013 -->
 
-Provide one of `sbom` or `target`, not both.
+Provide one of `sbom` or `target`, not both. With `validate-only`, you
+may omit both.
 
 ### Scan behaviour
 
@@ -727,6 +758,7 @@ cost of a download per run.
 
 | Name                 | Description                                                |
 | -------------------- | ---------------------------------------------------------- |
+| validated            | "true" when the inputs passed validation                   |
 | gating               | "true" when findings gate the workflow                     |
 | total-matches        | Total matches across all scanned artefacts                 |
 | gating-matches       | Matches in the gating bucket; 0 when the gate is unarmed   |
@@ -744,6 +776,9 @@ cost of a download per run.
 | report-files         | Newline-separated list of report files written             |
 
 <!-- markdownlint-enable MD013 -->
+
+In `validate-only` mode only `validated` is set; the scan outputs are
+empty.
 
 ## Notes
 

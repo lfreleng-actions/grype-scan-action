@@ -20,6 +20,18 @@ description: >
   bypasses.
 
 inputs:
+  validate-only:
+    description: >
+      Check the inputs exactly as a real run does, then stop: install
+      no Grype, fetch no database, scan nothing and read no bypass
+      issues. Lets an early validation job pass the same with: block
+      it gives the real scan and fail in seconds on a typo. Neither
+      sbom nor target is required in this mode, though giving both is
+      still an error. Sets the validated output; every scan output is
+      empty. 'true' or 'false'.
+    required: false
+    default: "false"
+
   # --- what to scan (exactly one of sbom / target) ---------------
   sbom:
     description: >
@@ -343,6 +355,11 @@ inputs:
     default: ""
 
 outputs:
+  validated:
+    description: >
+      'true' when every input passed validation. The only output set
+      in validate-only mode, where the scan outputs below are empty.
+    value: ${{ steps.validate.outputs.validated }}
   gating:
     description: "'true' when findings gate the workflow"
     value: ${{ steps.evaluate.outputs.gating }}
@@ -415,6 +432,7 @@ runs:
       id: validate
       shell: bash
       env:
+        INPUT_VALIDATE_ONLY: ${{ inputs.validate-only }}
         INPUT_SBOM: ${{ inputs.sbom }}
         INPUT_TARGET: ${{ inputs.target }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
@@ -439,7 +457,26 @@ runs:
         # anything, so a misconfiguration fails in seconds.
         set -euo pipefail
 
-        if [ -z "${INPUT_SBOM}" ] && [ -z "${INPUT_TARGET}" ]; then
+        # Unset only where the script runs outside the action; an
+        # empty value is still rejected below.
+        validate_only="${INPUT_VALIDATE_ONLY-false}"
+        case "${validate_only}" in
+          true|false) ;;
+          *)
+            echo "::error::validate-only must be 'true' or 'false';" \
+              "got '${validate_only}'"
+            exit 1
+            ;;
+        esac
+        # Published before the remaining checks, so a rejected input in
+        # validate-only mode still skips the always() steps below and
+        # the run stays offline.
+        echo "validate-only=${validate_only}" >> "${GITHUB_OUTPUT}"
+
+        # A validation job has nothing to scan yet, so the target is
+        # the one check this mode waives.
+        if [ -z "${INPUT_SBOM}" ] && [ -z "${INPUT_TARGET}" ] && \
+           [ "${validate_only}" != "true" ]; then
           echo "::error::provide either 'sbom' or 'target'"
           exit 1
         fi
@@ -590,9 +627,11 @@ runs:
         # the workspace off the import path, so a 'scripts' package in
         # the caller's workspace cannot stand in for the validator; see
         # scripts/launch.py.
-        python3 -I "${GITHUB_ACTION_PATH}/scripts/launch.py" window
+        # -B keeps the check from writing bytecode beside the action.
+        python3 -I -B "${GITHUB_ACTION_PATH}/scripts/launch.py" window
 
         echo "Inputs validated ✅"
+        echo "validated=true" >> "${GITHUB_OUTPUT}"
 
         # extra-args is a raw escape hatch appended to the scan argv,
         # so it can carry Grype's own configuration flags. The cache
@@ -635,8 +674,10 @@ runs:
         # one spelling rather than re-folding the raw input.
         echo "cache-db=${cache_db}" >> "${GITHUB_OUTPUT}"
 
+    # Every step below carries this guard, the always() ones included.
     - name: "Install Grype"
       id: grype
+      if: steps.validate.outputs.validate-only != 'true'
       # yamllint disable-line rule:line-length
       uses: anchore/scan-action/download-grype@27805bf3b4e84b4a5c980df22ed233c00390a439  # v7.4.2
       with:
@@ -651,7 +692,9 @@ runs:
 
     - name: "Resolve Grype DB cache location"
       id: grype-db
-      if: steps.validate.outputs.cache-db != 'false'
+      if: >-
+        steps.validate.outputs.validate-only != 'true'
+        && steps.validate.outputs.cache-db != 'false'
       shell: bash
       env:
         GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
@@ -797,7 +840,9 @@ runs:
         } >> "${GITHUB_OUTPUT}"
     - name: "Restore Grype DB from cache"
       id: grype-db-restore
-      if: steps.grype-db.outputs.cacheable == 'true'
+      if: >-
+        steps.validate.outputs.validate-only != 'true'
+        && steps.grype-db.outputs.cacheable == 'true'
       # Prefix restore rather than an exact key: the entry carries the
       # database build time, which cannot be known until the database
       # is in hand. `key` is the bare prefix, which never exists as a
@@ -813,7 +858,8 @@ runs:
     - name: "Refresh the Grype DB"
       id: grype-db-refresh
       if: >-
-        steps.validate.outputs.cache-db == 'true'
+        steps.validate.outputs.validate-only != 'true'
+        && steps.validate.outputs.cache-db == 'true'
         && steps.grype-db.outputs.cacheable == 'true'
       shell: bash
       env:
@@ -895,7 +941,8 @@ runs:
         } >> "${GITHUB_OUTPUT}"
     - name: "Save the Grype DB to cache"
       if: >-
-        steps.validate.outputs.cache-db == 'true'
+        steps.validate.outputs.validate-only != 'true'
+        && steps.validate.outputs.cache-db == 'true'
         && steps.grype-db.outputs.cacheable == 'true'
         && steps.grype-db-refresh.outputs.save == 'true'
       # The build time in the key is what makes this work: each
@@ -915,6 +962,7 @@ runs:
 
     - name: "Run Grype"
       id: scan
+      if: steps.validate.outputs.validate-only != 'true'
       shell: bash
       env:
         GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
@@ -1119,7 +1167,7 @@ runs:
     - name: "Collect approved bypasses"
       id: bypasses
       # yamllint disable-line rule:line-length
-      if: ${{ inputs.bypass-enabled == 'true' && steps.scan.outputs.no-artefacts != 'true' }}
+      if: ${{ steps.validate.outputs.validate-only != 'true' && inputs.bypass-enabled == 'true' && steps.scan.outputs.no-artefacts != 'true' }}
       shell: bash
       env:
         BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
@@ -1156,7 +1204,8 @@ runs:
 
     - name: "Evaluate findings"
       id: evaluate
-      if: ${{ always() && steps.scan.outputs.no-artefacts != 'true' }}
+      # yamllint disable-line rule:line-length
+      if: ${{ always() && steps.validate.outputs.validate-only != 'true' && steps.scan.outputs.no-artefacts != 'true' }}
       shell: bash
       env:
         MANIFEST: ${{ steps.scan.outputs.manifest }}
@@ -1186,7 +1235,7 @@ runs:
 
     - name: "Upload reports"
       # yamllint disable-line rule:line-length
-      if: ${{ always() && inputs.upload-artifact == 'true' && steps.scan.outputs.no-artefacts != 'true' }}
+      if: ${{ always() && steps.validate.outputs.validate-only != 'true' && inputs.upload-artifact == 'true' && steps.scan.outputs.no-artefacts != 'true' }}
       # yamllint disable-line rule:line-length
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
       with:
@@ -1196,7 +1245,8 @@ runs:
         if-no-files-found: warn
 
     - name: "Apply verdict"
-      if: ${{ always() && steps.scan.outputs.no-artefacts != 'true' }}
+      # yamllint disable-line rule:line-length
+      if: ${{ always() && steps.validate.outputs.validate-only != 'true' && steps.scan.outputs.no-artefacts != 'true' }}
       shell: bash
       env:
         GATING: ${{ steps.evaluate.outputs.gating }}
