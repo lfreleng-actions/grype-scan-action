@@ -201,6 +201,54 @@ for name, variable, value in INVALID:
     )
     check(f"{name} '{value}' sets no validated", "validated=" not in out, out)
 
+
+def escaped(value: str) -> str:
+    """The form the step must print a hostile value in."""
+    return (
+        value.replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+        .replace("##[", "##%5B")
+    )
+
+
+print("A rejected value cannot write a workflow command")
+# The runner reads a log line starting '::' or '##[' as a command, so
+# a caller-controlled value holding a line break could write one.
+HOSTILE = (
+    "medium\n::warning::injected",
+    "medium\r::warning::injected",
+    "medium\r\n::error::injected",
+    "medium\n##[warning]injected",
+    "medium%0A::warning::injected",
+)
+ECHOED = sorted({(name, variable) for name, variable, _ in INVALID})
+MODES: tuple[tuple[str, dict[str, str]], ...] = (
+    ("validate-only", {}),
+    ("normal", {"INPUT_VALIDATE_ONLY": "false", "INPUT_SBOM": "sbom.json"}),
+)
+for mode, mode_env in MODES:
+    for name, variable in ECHOED + [("validate-only", "INPUT_VALIDATE_ONLY")]:
+        for value in HOSTILE:
+            rc, log, out = run({**mode_env, variable: value})
+            # The label reaches the workflow log too, so it shows the
+            # value in the same escaped form the step prints.
+            shown = f"'{escaped(value)}'"
+            commands = [line for line in log.splitlines() if line.startswith("::")]
+            check(
+                f"{mode}: {name} {shown} writes only its own error",
+                rc != 0
+                and len(commands) == 1
+                and commands[0].startswith(f"::error::{name}"),
+                log[-300:],
+            )
+            check(f"{mode}: {name} {shown} writes no legacy marker", "##[" not in log)
+            check(
+                f"{mode}: {name} {shown} still reports the value",
+                f"got '{escaped(value)}'" in log,
+                log[-300:],
+            )
+
 print("Every later step is guarded")
 ordered = steps()
 check("validation runs first", ordered[0][0] == "Validate inputs", ordered[0][0])

@@ -457,6 +457,22 @@ runs:
         # anything, so a misconfiguration fails in seconds.
         set -euo pipefail
 
+        # Every rejected value passes through here before it reaches
+        # the log. The inputs are caller-controlled, and the runner
+        # reads a line starting '::' or '##[' as a workflow command, so
+        # an unescaped newline in a value would let a caller write one.
+        # Line breaks and '%' take the runner's own encoding, which it
+        # decodes when it displays the annotation; the legacy marker
+        # keeps its first two characters so the text stays readable.
+        printable() {
+          local text="$1"
+          text="${text//%/%25}"
+          text="${text//$'\r'/%0D}"
+          text="${text//$'\n'/%0A}"
+          text="${text//'##['/##%5B}"
+          printf '%s' "${text}"
+        }
+
         # Unset only where the script runs outside the action; an
         # empty value is still rejected below.
         validate_only="${INPUT_VALIDATE_ONLY-false}"
@@ -464,7 +480,7 @@ runs:
           true|false) ;;
           *)
             echo "::error::validate-only must be 'true' or 'false';" \
-              "got '${validate_only}'"
+              "got '$(printable "${validate_only}")'"
             exit 1
             ;;
         esac
@@ -489,7 +505,8 @@ runs:
           negligible|low|medium|high|critical|none) ;;
           *)
             echo "::error::fail-on must be one of negligible, low," \
-              "medium, high, critical, none; got '${INPUT_FAIL_ON}'"
+              "medium, high, critical, none; got" \
+              "'$(printable "${INPUT_FAIL_ON}")'"
             exit 1
             ;;
         esac
@@ -498,7 +515,8 @@ runs:
           package|severity|epss|risk|kev|vulnerability) ;;
           *)
             echo "::error::sort-by must be one of package, severity," \
-              "epss, risk, kev, vulnerability; got '${INPUT_SORT_BY}'"
+              "epss, risk, kev, vulnerability; got" \
+              "'$(printable "${INPUT_SORT_BY}")'"
             exit 1
             ;;
         esac
@@ -507,7 +525,8 @@ runs:
           always|dependencies-changed) ;;
           *)
             echo "::error::gate-when must be 'always' or" \
-              "'dependencies-changed'; got '${INPUT_GATE_WHEN}'"
+              "'dependencies-changed'; got" \
+              "'$(printable "${INPUT_GATE_WHEN}")'"
             exit 1
             ;;
         esac
@@ -520,7 +539,7 @@ runs:
           *)
             echo "::error::dependencies-changed must be 'true'," \
               "'false' or empty; got" \
-              "'${INPUT_DEPENDENCIES_CHANGED}'"
+              "'$(printable "${INPUT_DEPENDENCIES_CHANGED}")'"
             exit 1
             ;;
         esac
@@ -529,7 +548,8 @@ runs:
           all|declared) ;;
           *)
             echo "::error::dependency-policy must be 'all' or" \
-              "'declared'; got '${INPUT_DEPENDENCY_POLICY}'"
+              "'declared'; got" \
+              "'$(printable "${INPUT_DEPENDENCY_POLICY}")'"
             exit 1
             ;;
         esac
@@ -539,7 +559,7 @@ runs:
           *)
             echo "::error::transitive-fail-on must be one of" \
               "negligible, low, medium, high, critical, none; got" \
-              "'${INPUT_TRANSITIVE_FAIL_ON}'"
+              "'$(printable "${INPUT_TRANSITIVE_FAIL_ON}")'"
             exit 1
             ;;
         esac
@@ -549,7 +569,7 @@ runs:
           *)
             echo "::error::declared-source must be one of auto," \
               "sbom-graph, file, none; got" \
-              "'${INPUT_DECLARED_SOURCE}'"
+              "'$(printable "${INPUT_DECLARED_SOURCE}")'"
             exit 1
             ;;
         esac
@@ -575,7 +595,7 @@ runs:
           true|false|restore-only) ;;
           *)
             echo "::error::cache-db must be one of true, false," \
-              "restore-only; got '${INPUT_CACHE_DB}'"
+              "restore-only; got '$(printable "${INPUT_CACHE_DB}")'"
             exit 1
             ;;
         esac
@@ -588,7 +608,7 @@ runs:
           *,json,*) ;;
           *)
             echo "::error::output-formats must include 'json';" \
-              "got '${INPUT_FORMATS}'"
+              "got '$(printable "${INPUT_FORMATS}")'"
             exit 1
             ;;
         esac
@@ -596,7 +616,7 @@ runs:
         # The prefix becomes a filename and an artefact path.
         if [[ ! "${INPUT_PREFIX}" =~ ^[A-Za-z0-9._-]+$ ]]; then
           echo "::error::output-prefix must match [A-Za-z0-9._-]+;" \
-            "got '${INPUT_PREFIX}'"
+            "got '$(printable "${INPUT_PREFIX}")'"
           exit 1
         fi
 
@@ -609,7 +629,7 @@ runs:
           num_value="${pair#*:}"
           if [[ ! "${num_value}" =~ ^[0-9]+$ ]]; then
             echo "::error::${num_name} must be a whole number;" \
-              "got '${num_value}'"
+              "got '$(printable "${num_value}")'"
             exit 1
           fi
         done
@@ -618,7 +638,7 @@ runs:
            [[ ! "${INPUT_BYPASS_REPO}" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]
         then
           echo "::error::bypass-repository must be 'owner/name';" \
-            "got '${INPUT_BYPASS_REPO}'"
+            "got '$(printable "${INPUT_BYPASS_REPO}")'"
           exit 1
         fi
 

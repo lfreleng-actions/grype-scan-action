@@ -34,7 +34,13 @@ from scripts.model import (  # noqa: E402
     SEVERITY_ORDER,
     Settings,
 )
-from scripts.window import deadline, fix_date, parse_days, parse_start  # noqa: E402
+from scripts.window import (  # noqa: E402
+    annotation,
+    deadline,
+    fix_date,
+    parse_days,
+    parse_start,
+)
 
 FAILURES: list[str] = []
 TODAY = dt.date(2026, 6, 15)
@@ -145,6 +151,12 @@ check("today is accepted as a start", parse_start("2026-06-15", TODAY) == TODAY)
 for bad in ("2026-13-01", "2026-02-30", "2026/01/01", "20260101", "2026-1-1", "soon"):
     check(f"start '{bad}' is rejected", raises(parse_start, bad, TODAY))
 check("a future start is rejected", raises(parse_start, "2026-06-16", TODAY))
+check(
+    "a rejected value is escaped for the log",
+    annotation("x\n::warning::a\r##[warning]b%0A")
+    == "x%0A::warning::a%0D##%5Bwarning]b%250A",
+    annotation("x\n::warning::a\r##[warning]b%0A"),
+)
 
 print("fix dates")
 check(

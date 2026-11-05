@@ -28,8 +28,20 @@ def utc_today() -> dt.date:
 
 
 def annotation(text: object) -> str:
-    """Escape a value for a workflow command, so it cannot end it early."""
-    return str(text).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    """Escape a value for a workflow command, so it cannot end it early.
+
+    The runner reads a line starting ``::`` or ``##[`` as a command, so
+    line breaks take its own encoding and the legacy marker loses the
+    bracket that would let it parse. Mirrors the ``printable`` helper
+    in the action's ``Validate inputs`` step.
+    """
+    return (
+        str(text)
+        .replace("%", "%25")
+        .replace("\r", "%0D")
+        .replace("\n", "%0A")
+        .replace("##[", "##%5B")
+    )
 
 
 def parse_days(value: str | None) -> int | None:
