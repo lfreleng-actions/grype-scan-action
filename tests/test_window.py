@@ -335,7 +335,7 @@ check("no finding stops gating when the window is set", not violations, violatio
 check("the window does add gating, so the check is not vacuous", added > 0, added)
 
 print("reporting")
-today = dt.datetime.now(dt.timezone.utc).date()
+today = dt.datetime.now(dt.UTC).date()
 recent = (today - dt.timedelta(days=2)).isoformat()
 expected = (today + dt.timedelta(days=12)).isoformat()
 with tempfile.TemporaryDirectory() as tmp:

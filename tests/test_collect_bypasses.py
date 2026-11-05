@@ -28,7 +28,7 @@ FAILURES: list[str] = []
 
 # Issue events are dated relative to this instant, so a test can place
 # a rename before or after the label event without touching the clock.
-BASE = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+BASE = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
 
 
 def check(label: str, condition: bool, detail: object = "") -> None:
@@ -45,7 +45,7 @@ def stamp(when: dt.datetime) -> str:
 
 
 def issue(number: int, title: str, days_old: int = 0, pull: bool = False) -> dict:
-    created = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days_old)
+    created = dt.datetime.now(dt.UTC) - dt.timedelta(days=days_old)
     entry = {
         "number": number,
         "title": title,

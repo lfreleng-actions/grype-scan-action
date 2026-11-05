@@ -91,7 +91,7 @@ def run_step(step_name: str, extra_env: dict[str, str]) -> tuple[int, str, str, 
         workspace.mkdir()
         plant(workspace)
         # The steps call python3 by name; make that this interpreter,
-        # so 'python3.10 tests/test_isolation.py' tests 3.10.
+        # so 'python3.11 tests/test_isolation.py' tests 3.11.
         shim = base / "bin"
         shim.mkdir()
         (shim / "python3").symlink_to(sys.executable)

@@ -338,7 +338,7 @@ def main() -> int:
         emit("bypasses", "[]")
         return 0
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = dt.datetime.now(dt.UTC)
     collected: list[dict] = []
     for issue in issues:
         if expired(issue, now, max_age):
