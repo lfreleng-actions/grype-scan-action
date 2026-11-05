@@ -314,6 +314,22 @@ jobs:
           echo "Error: output-formats without json was accepted ❌"
           exit 1
 
+      - name: "Invalid validate-only"
+        id: bad_validate_only
+        continue-on-error: true
+        uses: $/
+        with:
+          target: "registry:alpine:3.10"
+          validate-only: "yes"
+
+      - name: "Error if invalid validate-only did NOT fail"
+        if: steps.bad_validate_only.outcome == 'success'
+        shell: bash
+        run: |
+          # A typo must not silently run, or skip, the real scan
+          echo "Error: invalid validate-only was accepted ❌"
+          exit 1
+
       # --- missing SBOM is a warning, not a crash -----------------
       - name: "SBOM glob matching nothing"
         id: no_sbom
@@ -918,6 +934,261 @@ jobs:
           fi
           echo "invalid cache-db rejected as expected"
 
+  validate-only:
+    name: "Validate-only mode"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      # Not the organisation allow-list: validate-only mode must make
+      # no network request, so this allows only github.com, which the
+      # mode never contacts. Grype's installer, its database feed and
+      # the bypass lookup are all blocked, and any step that reached
+      # for one would fail the job.
+      - name: 'Harden runner (block, minimal allow-list)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            github.com:443
+
+      # Every input the workflow families pass, with no sbom.
+      - name: "Validate a policy set"
+        id: policy
+        uses: $/
+        with:
+          validate-only: 'true'
+          fail-on: 'high'
+          gate-when: 'dependencies-changed'
+          dependency-policy: 'declared'
+          transitive-fail-on: 'critical'
+          only-fixed: 'true'
+          remediation-window-days: '30'
+          remediation-window-start: '2026-01-01'
+          bypass-repository: 'lfreleng-actions/grype-scan-action'
+          cache-db: 'true'
+
+      - name: "Check validate-only ran nothing else"
+        shell: bash
+        env:
+          VALIDATED: ${{ steps.policy.outputs.validated }}
+          GATING: ${{ steps.policy.outputs.gating }}
+          TOTAL: ${{ steps.policy.outputs.total-matches }}
+          REPORTS: ${{ steps.policy.outputs.report-files }}
+        run: |
+          # The checks passed, and no install, database or scan step
+          # left anything behind
+          set -euo pipefail
+          if [ "${VALIDATED}" != "true" ]; then
+            echo "Expected validated=true, got '${VALIDATED}' ❌"
+            exit 1
+          fi
+          if [ -n "${GATING}${TOTAL}${REPORTS}" ]; then
+            echo "Scan outputs set in validate-only mode ❌"
+            exit 1
+          fi
+          if command -v grype >/dev/null 2>&1 || \
+             [ -e "${RUNNER_TOOL_CACHE}/grype" ]; then
+            echo "A Grype binary was installed ❌"
+            exit 1
+          fi
+          if [ -e "${HOME}/.cache/grype" ]; then
+            echo "A Grype database step ran ❌"
+            exit 1
+          fi
+          if compgen -G 'grype-results*' >/dev/null; then
+            echo "A scan wrote reports ❌"
+            exit 1
+          fi
+          echo "validate-only checked the inputs and stopped ✅"
+
+      # --- each validated input still fails ------------------------
+      - name: "Validate-only rejects fail-on 'catastrophic'"
+        id: bad_fail_on
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          fail-on: 'catastrophic'
+
+      - name: "Validate-only rejects sort-by 'alphabetical'"
+        id: bad_sort_by
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          sort-by: 'alphabetical'
+
+      - name: "Validate-only rejects gate-when 'sometimes'"
+        id: bad_gate_when
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          gate-when: 'sometimes'
+
+      - name: "Validate-only rejects dependencies-changed 'yes'"
+        id: bad_deps_changed
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          dependencies-changed: 'yes'
+
+      - name: "Validate-only rejects dependency-policy 'lenient'"
+        id: bad_policy
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          dependency-policy: 'lenient'
+
+      - name: "Validate-only rejects transitive-fail-on 'severe'"
+        id: bad_transitive
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          transitive-fail-on: 'severe'
+
+      - name: "Validate-only rejects declared-source 'guess'"
+        id: bad_declared_source
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          declared-source: 'guess'
+
+      - name: "Validate-only rejects cache-db 'restore_only'"
+        id: bad_cache_db
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          cache-db: 'restore_only'
+
+      - name: "Validate-only rejects output-formats 'table,sarif'"
+        id: bad_formats
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          output-formats: 'table,sarif'
+
+      - name: "Validate-only rejects output-prefix '../escape'"
+        id: bad_prefix
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          output-prefix: '../escape'
+
+      - name: "Validate-only rejects summary-max-rows 'lots'"
+        id: bad_max_rows
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          summary-max-rows: 'lots'
+
+      - name: "Validate-only rejects bypass-max-age-days '-1'"
+        id: bad_max_age
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          bypass-max-age-days: '-1'
+
+      - name: "Validate-only rejects retention-days '1.5'"
+        id: bad_retention
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          retention-days: '1.5'
+
+      - name: "Validate-only rejects bypass-repository 'not a repo'"
+        id: bad_bypass_repo
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          bypass-repository: 'not a repo'
+
+      - name: "Validate-only rejects remediation-window-days '-1'"
+        id: bad_window_days
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          remediation-window-days: '-1'
+
+      - name: "Validate-only rejects remediation-window-start '2999-01-01'"
+        id: future_window_start
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          remediation-window-start: '2999-01-01'
+
+      - name: "Validate-only rejects remediation-window-start '0000-01-01'"
+        id: year_zero_window_start
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          remediation-window-start: '0000-01-01'
+
+      - name: "Validate-only rejects sbom with target"
+        id: both_sources
+        continue-on-error: true
+        uses: $/
+        with:
+          validate-only: 'true'
+          sbom: 'sbom.json'
+          target: 'dir:.'
+
+      - name: "Error if any invalid input was accepted"
+        shell: bash
+        env:
+          OUTCOMES: |
+            bad_fail_on=${{ steps.bad_fail_on.outcome }}
+            bad_sort_by=${{ steps.bad_sort_by.outcome }}
+            bad_gate_when=${{ steps.bad_gate_when.outcome }}
+            bad_deps_changed=${{ steps.bad_deps_changed.outcome }}
+            bad_policy=${{ steps.bad_policy.outcome }}
+            bad_transitive=${{ steps.bad_transitive.outcome }}
+            bad_declared_source=${{ steps.bad_declared_source.outcome }}
+            bad_cache_db=${{ steps.bad_cache_db.outcome }}
+            bad_formats=${{ steps.bad_formats.outcome }}
+            bad_prefix=${{ steps.bad_prefix.outcome }}
+            bad_max_rows=${{ steps.bad_max_rows.outcome }}
+            bad_max_age=${{ steps.bad_max_age.outcome }}
+            bad_retention=${{ steps.bad_retention.outcome }}
+            bad_bypass_repo=${{ steps.bad_bypass_repo.outcome }}
+            bad_window_days=${{ steps.bad_window_days.outcome }}
+            future_window_start=${{ steps.future_window_start.outcome }}
+            year_zero_window_start=${{ steps.year_zero_window_start.outcome }}
+            both_sources=${{ steps.both_sources.outcome }}
+        run: |
+          # The error text is asserted in tests/test_validate_only.py;
+          # a caller cannot read a composite step's log
+          set -euo pipefail
+          failed=0
+          while IFS='=' read -r name outcome; do
+            [ -n "${name}" ] || continue
+            if [ "${outcome}" != "failure" ]; then
+              echo "${name}: expected failure, got '${outcome}' ❌"
+              failed=1
+            fi
+          done <<< "${OUTCOMES}"
+          if [ "${failed}" != "0" ]; then
+            exit 1
+          fi
+          echo "Every invalid input failed in validate-only mode ✅"
+
   unit:
     name: "Evaluate script unit tests"
     runs-on: ubuntu-latest
@@ -961,3 +1232,4 @@ jobs:
           python3 tests/test_provenance.py
           python3 tests/test_window.py
           python3 tests/test_isolation.py
+          python3 tests/test_validate_only.py
