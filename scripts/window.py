@@ -24,7 +24,7 @@ DATE_PATTERN = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 def utc_today() -> dt.date:
     """The current date in UTC, the clock every deadline is read against."""
-    return dt.datetime.now(dt.timezone.utc).date()
+    return dt.datetime.now(dt.UTC).date()
 
 
 def annotation(text: object) -> str:

@@ -29,6 +29,7 @@ select = ["E", "W", "F", "I", "B", "C4", "UP"]
 ignore = [
   "E501", # line-too-long: the formatter owns line length
   "B008", # function call in argument default: typer/click idiom
+  "UP042", # str-Enum to StrEnum: changes str()/format() of members
 ]
 
 [lint.per-file-ignores]
