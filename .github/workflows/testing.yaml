@@ -1233,3 +1233,4 @@ jobs:
           python3 tests/test_window.py
           python3 tests/test_isolation.py
           python3 tests/test_validate_only.py
+          python3 tests/test_install_retry.py
