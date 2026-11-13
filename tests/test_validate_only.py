@@ -117,7 +117,13 @@ def run(overrides: dict[str, str]) -> tuple[int, str, str]:
         }
         env.update(POLICY_SET)
         env.update(overrides)
-        env.update({"GITHUB_ACTION_PATH": str(ROOT), "GITHUB_OUTPUT": str(outputs)})
+        env.update(
+            {
+                "GITHUB_ACTION_PATH": str(ROOT),
+                "GITHUB_OUTPUT": str(outputs),
+                "PYTHON": sys.executable,
+            }
+        )
         result = subprocess.run(
             ["bash", "-c", VALIDATE],
             cwd=tmp,
@@ -251,9 +257,13 @@ for mode, mode_env in MODES:
 
 print("Every later step is guarded")
 ordered = steps()
-check("validation runs first", ordered[0][0] == "Validate inputs", ordered[0][0])
-check("validation is unguarded", condition(ordered[0][1]) == "", ordered[0][0])
-for name, body in ordered[1:]:
+# Validation needs the interpreter, so its setup is the one step
+# allowed ahead of it, and it too must run in validate-only mode.
+check("Python is set up first", ordered[0][0] == "Set up Python", ordered[0][0])
+check("the Python setup is unguarded", condition(ordered[0][1]) == "", ordered[0][0])
+check("validation runs next", ordered[1][0] == "Validate inputs", ordered[1][0])
+check("validation is unguarded", condition(ordered[1][1]) == "", ordered[1][0])
+for name, body in ordered[2:]:
     check(f"'{name}' is skipped in validate-only mode", GUARD in condition(body))
 
 print("The validated output")

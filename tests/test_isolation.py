@@ -12,6 +12,9 @@ module name. Each planted module records itself in a marker file and
 stops the run, so a step that loads one fails here however the rest
 of it behaves.
 
+The steps run the interpreter the action set up, named by $PYTHON,
+so a python3 planted on PATH must never run either.
+
 Like the other tests, this runs with a bare python3 and needs no
 network, no Grype binary and no YAML library.
 """
@@ -90,12 +93,18 @@ def run_step(step_name: str, extra_env: dict[str, str]) -> tuple[int, str, str, 
         workspace = base / "workspace"
         workspace.mkdir()
         plant(workspace)
-        # The steps call python3 by name; make that this interpreter,
-        # so 'python3.11 tests/test_isolation.py' tests 3.11.
+        marker = base / "planted-ran"
+        # A python3 first on PATH that records itself and fails, as a
+        # caller's earlier step could leave one; the steps must not
+        # resolve their interpreter there.
         shim = base / "bin"
         shim.mkdir()
-        (shim / "python3").symlink_to(sys.executable)
-        marker = base / "planted-ran"
+        planted = shim / "python3"
+        planted.write_text(
+            f"#!/bin/sh\necho PATH-python3 >> '{marker}'\nexit 97\n",
+            encoding="utf-8",
+        )
+        planted.chmod(0o755)
         outputs = base / "github-output"
         summary = base / "step-summary"
         outputs.touch()
@@ -114,6 +123,9 @@ def run_step(step_name: str, extra_env: dict[str, str]) -> tuple[int, str, str, 
                 "GITHUB_OUTPUT": str(outputs),
                 "GITHUB_STEP_SUMMARY": str(summary),
                 "PLANT_MARKER": str(marker),
+                # What the setup step's python-path output supplies;
+                # this interpreter, so 'python3.11 tests/...' tests 3.11.
+                "PYTHON": sys.executable,
                 # A PYTHONPATH naming the workspace is what the old
                 # invocation amounted to; -I must ignore it.
                 "PYTHONPATH": str(workspace),
@@ -243,12 +255,14 @@ result = subprocess.run(
 )
 check("refuses a helper it does not know", result.returncode == 2, result.stderr)
 
-# Every interpreter the action starts must be isolated, so a helper
-# added later cannot reopen the hole. This is a tripwire for the forms
-# action.yaml writes, not a shell parser: an interpreter reached
-# through a variable ("$py") or a script's shebang is not seen.
-print("Every python3 in action.yaml runs isolated")
+# Every interpreter the action starts must be the one it set up, and
+# isolated, so a helper added later cannot reopen either hole. This is
+# a tripwire for the forms action.yaml writes, not a shell parser: an
+# interpreter reached through another variable ("$py") or a script's
+# shebang is not seen.
+print("Every Python in action.yaml is the action's own, run isolated")
 INTERPRETER = re.compile(r"(?:^|[\s;&|(`/\"'])python3?(?:\.\d+)?(?=[\s<\"']|$)")
+OWN_INTERPRETER = re.compile(r"\"\$\{?PYTHON\}?\"")
 
 
 def isolated(words: list[str]) -> bool:
@@ -290,12 +304,19 @@ for words, expected in (
         f"the check reads {words} as isolated={expected}", isolated(words) is expected
     )
 
+own_runs = 0
 for number, line in enumerate((ROOT / "action.yaml").read_text().splitlines(), 1):
     if line.lstrip().startswith("#"):
         continue
-    for match in INTERPRETER.finditer(line):
-        rest = line[match.end() :].lstrip("\"'").split()
+    if INTERPRETER.search(line):
+        check(f"line {number} runs no Python from PATH", False, line.strip())
+    for match in OWN_INTERPRETER.finditer(line):
+        own_runs += 1
+        rest = line[match.end() :].split()
+        if rest and rest[-1] == "\\":
+            rest.pop()
         check(f"line {number} passes -I", isolated(rest), line.strip())
+check("the tripwire found the action's interpreter", own_runs > 0, own_runs)
 
 print()
 if FAILURES:
