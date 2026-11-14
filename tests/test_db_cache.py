@@ -177,6 +177,7 @@ def run_resolve(
                 "GRYPE_CMD": str(stub),
                 "INPUT_CONFIG": "",
                 "GITHUB_OUTPUT": str(out_file),
+                "PYTHON": sys.executable,
             },
         )
         outputs = read_outputs(out_file)

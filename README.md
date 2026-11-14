@@ -468,8 +468,11 @@ it passes the real scan:
 The step runs the checks a real scan runs, with one exception: it
 needs neither `sbom` nor `target`, though passing both is still an
 error. It then stops. It installs no Grype, fetches no database, scans
-nothing, reads no bypass issues and makes no network request. A pass
-sets the `validated` output to `true`; every other output stays empty.
+nothing and reads no bypass issues. It still sets up the action's
+Python (see [Notes](#notes)), which needs no network request where the
+runner's tool cache holds that version, as GitHub-hosted runners do.
+A pass sets the `validated` output to `true`; every other output stays
+empty.
 Because the checks are the action's own, a validation job using this
 mode cannot drift from what the scan accepts.
 
@@ -804,3 +807,10 @@ A Grype configuration file taken from a pull request head is
 attacker-controlled: a contributor can add ignore rules to their own
 branch. Prefer bypass issues, which live outside the branch under
 review. Trust `config` when it comes from the base repository.
+
+The action's helpers run on a Python 3.13 that
+[`actions/setup-python`](https://github.com/actions/setup-python) sets
+up as the action's first step, never on the `python3` the caller's
+`PATH` names, so an earlier step in the job cannot choose the
+interpreter. The setup passes `update-environment: false`, leaving the
+job's own `PATH` and Python unchanged for the steps that follow.

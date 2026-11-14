@@ -428,10 +428,25 @@ outputs:
 runs:
   using: "composite"
   steps:
+    # The helpers run on this interpreter rather than whatever python3
+    # the caller's PATH names, so an earlier step in the job cannot
+    # swap in its own. update-environment: false leaves the caller's
+    # PATH and Python alone for the steps after this action. Unguarded,
+    # as validation needs it too; on a runner whose tool cache already
+    # holds this version it downloads nothing.
+    - name: "Set up Python"
+      id: setup-python
+      # yamllint disable-line rule:line-length
+      uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+      with:
+        python-version: "3.13"
+        update-environment: false
+
     - name: "Validate inputs"
       id: validate
       shell: bash
       env:
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
         INPUT_VALIDATE_ONLY: ${{ inputs.validate-only }}
         INPUT_SBOM: ${{ inputs.sbom }}
         INPUT_TARGET: ${{ inputs.target }}
@@ -648,7 +663,7 @@ runs:
         # the caller's workspace cannot stand in for the validator; see
         # scripts/launch.py.
         # -B keeps the check from writing bytecode beside the action.
-        python3 -I -B "${GITHUB_ACTION_PATH}/scripts/launch.py" window
+        "${PYTHON}" -I -B "${GITHUB_ACTION_PATH}/scripts/launch.py" window
 
         echo "Inputs validated ✅"
         echo "validated=true" >> "${GITHUB_OUTPUT}"
@@ -810,6 +825,7 @@ runs:
         GRYPE_CMD: ${{ steps.grype.outputs.cmd }}
         INPUT_CONFIG: ${{ inputs.config }}
         GRYPE_CHECK_FOR_APP_UPDATE: "false"
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
       run: |
         set -euo pipefail
         # The same --config the scan uses: a config that moves
@@ -887,8 +903,8 @@ runs:
                "POSIX path (${dir})" ;;
         esac
         canonical() {
-          python3 -I -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' \
-            "$1"
+          "${PYTHON}" -I -c \
+            'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"
         }
         dir=$(canonical "${dir}")
         # The root has to be rejected on its own: the containment test
@@ -1286,6 +1302,7 @@ runs:
         BYPASS_MAX_AGE: ${{ inputs.bypass-max-age-days }}
         GH_TOKEN: ${{ inputs.github-token }}
         API_URL: ${{ github.api_url }}
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
       run: |
         # Read maintainer-approved bypasses from labelled issues.
         #
@@ -1310,7 +1327,8 @@ runs:
         # -I keeps the workspace, which may hold an untrusted checkout,
         # off the import path; launch.py binds the action's own
         # helpers by path. See scripts/launch.py.
-        python3 -I "${GITHUB_ACTION_PATH}/scripts/launch.py" collect_bypasses
+        "${PYTHON}" -I "${GITHUB_ACTION_PATH}/scripts/launch.py" \
+          collect_bypasses
 
     - name: "Evaluate findings"
       id: evaluate
@@ -1337,11 +1355,12 @@ runs:
         INPUT_REMEDIATION_WINDOW_DAYS: ${{ inputs.remediation-window-days }}
         INPUT_REMEDIATION_WINDOW_START: ${{ inputs.remediation-window-start }}
         BYPASS_REPO: ${{ inputs.bypass-repository || github.repository }}
+        PYTHON: ${{ steps.setup-python.outputs.python-path }}
       run: |
         # Turn the JSON report(s) into a table, counts and a verdict.
         set -uo pipefail
         # Isolated for the same reason as the bypass step above.
-        python3 -I "${GITHUB_ACTION_PATH}/scripts/launch.py" evaluate
+        "${PYTHON}" -I "${GITHUB_ACTION_PATH}/scripts/launch.py" evaluate
 
     - name: "Upload reports"
       # yamllint disable-line rule:line-length
