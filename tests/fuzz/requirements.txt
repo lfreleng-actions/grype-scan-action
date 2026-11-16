@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+#
+# Fuzzing toolchain for tests/fuzz_*.py, installed only by the fuzz job
+# in .github/workflows/testing.yaml and never by the action. Atheris
+# publishes Linux x86_64 wheels for CPython 3.12 to 3.14 and no source
+# distribution, so install it binary-only with every hash checked:
+#
+#   python3 -m pip install --require-hashes --only-binary=:all: \
+#     -r tests/fuzz/requirements.txt
+#
+# Dependabot bumps the pin and its hashes together.
+atheris==3.1.0 \
+    --hash=sha256:315a0b5c819852b1ffe1ca72efc389c7724881f2c33e4aacb8c6bcec49bd5011 \
+    --hash=sha256:ec5e11f21a4c197fe91f7aea2b2de88e623c73a21fc07b105ac6329a1588457b \
+    --hash=sha256:f8a9f51ce8369026e8eb7b7174835e8c4c85a1a6db5d9add36c15100779d2a39

@@ -58,13 +58,16 @@ def load_document(path: str) -> dict | None:
     ValueError covers both a malformed document and one that is not
     valid UTF-8, neither of which may abort the run: an SBOM we cannot
     interpret means we cannot classify, not that we cannot scan.
+    RecursionError is the same case at depth: before Python 3.14 the
+    decoder recurses once per nested array or object, so about ten
+    thousand opening brackets exhaust the stack.
     """
     if not path or not os.path.exists(path):
         return None
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
-    except (OSError, ValueError):
+    except (OSError, RecursionError, ValueError):
         return None
     return data if isinstance(data, dict) else None
 

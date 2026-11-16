@@ -16,3 +16,13 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 15
+
+  # Atheris for the fuzz job, pinned by hash; bumps rewrite the hashes.
+  - package-ecosystem: "pip"
+    directory: "/tests/fuzz"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "Build(fuzz)"
+    cooldown:
+      default-days: 7

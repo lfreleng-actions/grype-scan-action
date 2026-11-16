@@ -1234,3 +1234,89 @@ jobs:
           python3 tests/test_isolation.py
           python3 tests/test_validate_only.py
           python3 tests/test_install_retry.py
+          python3 tests/test_fuzz_replay.py
+
+  fuzz:
+    name: "Fuzz ${{ matrix.harness }}"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # One harness per parser of untrusted input; see README.
+        harness: ["fuzz_sbom", "fuzz_bypasses"]
+    steps:
+      # Load the egress allow-list out-of-band from the organisation's
+      # .github repository and publish it as $CONNECTION_ALLOW_LIST.
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@bd83615a22b57835798adcb9ce753161464dfb40  # v0.16.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+
+      - name: 'Harden runner (block)'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Atheris ships wheels for CPython 3.12 to 3.14 only; 3.13 is
+      # also the interpreter the action runs its helpers on.
+      - name: "Set up Python"
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: "Install Atheris from the hash-locked file"
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes --only-binary=:all: \
+            -r tests/fuzz/requirements.txt
+
+      - name: "Fuzz for a bounded time"
+        shell: bash
+        env:
+          HARNESS: ${{ matrix.harness }}
+        run: |
+          # A crash or a per-input timeout exits non-zero and writes
+          # the offending input under fuzz-artifacts/.
+          set -euo pipefail
+          mkdir -p fuzz-artifacts
+          python "tests/${HARNESS}.py" \
+            -max_total_time=60 \
+            -timeout=10 \
+            -print_final_stats=1 \
+            -artifact_prefix=fuzz-artifacts/
+
+      - name: "Show the failing input"
+        if: failure()
+        shell: bash
+        run: |
+          # Also uploaded below; base64 keeps it in the log as well.
+          set -euo pipefail
+          for input in fuzz-artifacts/*; do
+            [ -f "${input}" ] || continue
+            echo "${input}:"
+            base64 "${input}"
+          done
+
+      - name: "Upload the failing input"
+        if: failure()
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: "${{ matrix.harness }}-failing-input"
+          path: fuzz-artifacts/
+          if-no-files-found: ignore

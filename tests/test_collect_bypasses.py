@@ -372,6 +372,33 @@ ids = {entry["id"] for entry in found}
 check("second page read", "CVE-2026-999" in ids, sorted(ids)[:3])
 check("all entries collected", len(found) == 101, len(found))
 
+print("unencodable titles")
+# JSON can carry a lone surrogate, which no codec encodes. The warning
+# naming the approved title printed it raw, so a UTF-8 stdout raised
+# and aborted the run instead of the gate staying in control.
+import contextlib  # noqa: E402
+
+raw = io.BytesIO()
+strict = io.TextIOWrapper(raw, encoding="utf-8", errors="strict", write_through=True)
+surrogate = "BYPASS: CVE-2026-7 \ud800"
+try:
+    with contextlib.redirect_stdout(strict):
+        found = collect(
+            [[issue(7, "BYPASS: CVE-2026-7")]],
+            {7: [labelled(1), renamed(2, surrogate, "BYPASS: CVE-2026-7", 5)]},
+        )
+    raised = None
+except UnicodeEncodeError as exc:
+    found, raised = [], exc
+check("a lone surrogate in a title does not abort the run", raised is None, raised)
+check(
+    "the approved title is still honoured",
+    [entry["id"] for entry in found] == ["CVE-2026-7"],
+    found,
+)
+printed = raw.getvalue().decode("utf-8")
+check("the surrogate is printed escaped", "\\ud800" in printed, printed)
+
 print("failure handling")
 
 

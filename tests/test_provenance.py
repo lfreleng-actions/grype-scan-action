@@ -1100,6 +1100,22 @@ check(
     build(handle.name, "", "sbom-graph").source == SOURCE_NONE,
 )
 
+# Found while writing the SBOM fuzz harness. Before Python 3.14 the
+# JSON decoder recurses per level and raises RecursionError, which is
+# not a ValueError, so a deeply nested document aborted the run instead
+# of reading as unusable. Both shapes are checked: unclosed, and a
+# well-formed document that 3.14 parses and then refuses as not
+# CycloneDX.
+DEPTH = 100_000
+for label, payload in (
+    ("an unclosed", "[" * DEPTH),
+    ("a well-formed", '{"a":' + "[" * DEPTH + "]" * DEPTH + "}"),
+):
+    check(
+        f"{label} deeply nested SBOM is refused",
+        build(written(payload), "", "sbom-graph").source == SOURCE_NONE,
+    )
+
 print()
 if FAILURES:
     print(f"{len(FAILURES)} test(s) failed ❌")

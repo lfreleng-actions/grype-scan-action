@@ -814,3 +814,39 @@ up as the action's first step, never on the `python3` the caller's
 `PATH` names, so an earlier step in the job cannot choose the
 interpreter. The setup passes `update-environment: false`, leaving the
 job's own `PATH` and Python unchanged for the steps that follow.
+
+## Fuzzing
+
+Two inputs on the gate come from outside the repository, and each has
+an [Atheris](https://github.com/google/atheris) harness that checks
+the contract its module documents:
+
+- `tests/fuzz_sbom.py` reads arbitrary bytes as a CycloneDX SBOM. No
+  read or classification may raise. The project, including each
+  module of a Maven reactor, Gradle build or Cargo workspace, and the
+  dependencies it names never count as inherited. Nothing else does
+  unless the document is CycloneDX from a measured schema version and
+  generator, a Gradle build marks its projects usably, and its own
+  graph reaches it from the project.
+- `tests/fuzz_bypasses.py` feeds arbitrary bypass titles and issue
+  event histories. Verifying an issue returns a title or a refusal,
+  never an exception, even when a warning prints to a strict UTF-8
+  stdout. A title it returns must be the one the history shows at the
+  last application of the bypass label.
+
+The testing workflow fuzzes each harness for 60 seconds on every pull
+request and push. A crash or a slow input fails the job, which prints
+the input in base64 and uploads it as an artifact.
+`tests/test_fuzz_replay.py` replays the seed inputs through the same
+checks without Atheris, in the unit job, and confirms the checks
+reject a classifier and an approval verifier that break their
+contracts.
+
+To run a harness by hand on Linux x86_64 with CPython 3.12 to 3.14:
+
+```bash
+python3 -m pip install --require-hashes --only-binary=:all: \
+  -r tests/fuzz/requirements.txt
+python3 tests/fuzz_sbom.py -max_total_time=60 -timeout=10
+python3 tests/fuzz_sbom.py crash-<hash>  # reproduce one input
+```
