@@ -94,9 +94,20 @@ def emit(name: str, value: str) -> None:
             handle.write(f"{name}={value}\n")
 
 
+def say(text: str) -> None:
+    """Print a line that stdout can always encode.
+
+    Titles and event histories come from the API, and JSON can carry a
+    lone surrogate that no codec encodes. Printing one raw would raise
+    and abort the run, so whatever stdout cannot encode is escaped.
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    print(text.encode(encoding, "backslashreplace").decode(encoding))
+
+
 def warn(message: str) -> None:
     """Surface a problem on the run page without failing the step."""
-    print(f"::warning::{message}")
+    say(f"::warning::{message}")
 
 
 MAX_PAGES = 20
@@ -373,9 +384,9 @@ def main() -> int:
 
     if collected:
         listed = ", ".join(sorted({entry["id"] for entry in collected}))
-        print(f"Approved bypasses in {repo}: {listed}")
+        say(f"Approved bypasses in {repo}: {listed}")
     else:
-        print(f"No approved bypasses found in {repo}")
+        say(f"No approved bypasses found in {repo}")
     return 0
 
 
