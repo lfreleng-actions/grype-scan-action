@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import tempfile
 
 
 def encoded(value: object) -> bytes:
@@ -263,3 +264,28 @@ def write_corpus(directory: str, seeds: list[bytes]) -> None:
     """Write each seed to its own file, the layout libFuzzer reads."""
     for number, seed in enumerate(seeds):
         (pathlib.Path(directory) / f"seed-{number:03d}").write_bytes(seed)
+
+
+def names_input(args: list[str]) -> bool:
+    """Whether an argument after the harness names an existing file.
+
+    libFuzzer runs named files one by one instead of fuzzing, so no
+    seeds belong then. Options start with '-'; any other argument is
+    a corpus directory or an input file.
+    """
+    return any(
+        not arg.startswith("-") and pathlib.Path(arg).is_file() for arg in args[1:]
+    )
+
+
+def seeded(args: list[str], seeds: list[bytes], prefix: str) -> list[str]:
+    """The harness arguments, with a seed corpus appended when fuzzing.
+
+    The seeds go after any directories given, so libFuzzer still writes
+    the inputs it keeps to the first of those.
+    """
+    if names_input(args):
+        return args
+    corpus = tempfile.mkdtemp(prefix=prefix)
+    write_corpus(corpus, seeds)
+    return [*args, corpus]
