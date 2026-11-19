@@ -175,17 +175,9 @@ def main() -> None:
     from atheris.instrument_bytecode import (  # pyright: ignore[reportMissingModuleSource]
         instrument_all,
     )
-    from fuzz_seeds import BYPASS_SEEDS, write_corpus
+    from fuzz_seeds import BYPASS_SEEDS, seeded
 
-    args = sys.argv
-    # libFuzzer runs file arguments one by one instead of fuzzing, so
-    # add the seed corpus only when no input was named.
-    if not any(not arg.startswith("-") for arg in args[1:]):
-        import tempfile
-
-        corpus = tempfile.mkdtemp(prefix="fuzz-bypasses-corpus-")
-        write_corpus(corpus, BYPASS_SEEDS)
-        args = [*args, corpus]
+    args = seeded(sys.argv, BYPASS_SEEDS, "fuzz-bypasses-corpus-")
     instrument_all()
     atheris.Setup(args, check)
     atheris.Fuzz()

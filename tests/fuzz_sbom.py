@@ -322,15 +322,9 @@ def main() -> None:
     from atheris.instrument_bytecode import (  # pyright: ignore[reportMissingModuleSource]
         instrument_all,
     )
-    from fuzz_seeds import SBOM_SEEDS, write_corpus
+    from fuzz_seeds import SBOM_SEEDS, seeded
 
-    args = sys.argv
-    # libFuzzer runs file arguments one by one instead of fuzzing, so
-    # add the seed corpus only when no input was named.
-    if not any(not arg.startswith("-") for arg in args[1:]):
-        corpus = tempfile.mkdtemp(prefix="fuzz-sbom-corpus-")
-        write_corpus(corpus, SBOM_SEEDS)
-        args = [*args, corpus]
+    args = seeded(sys.argv, SBOM_SEEDS, "fuzz-sbom-corpus-")
     instrument_all()
     atheris.Setup(args, check)
     atheris.Fuzz()

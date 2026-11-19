@@ -12,12 +12,16 @@ Both fail the suite, with the seed that did it.
 It then swaps in a classifier, and an approval verifier, that break
 their contracts in known ways and checks each oracle rejects every
 one, so a weakened oracle fails here rather than passing every fuzz
-run.
+run. Last, it checks the harnesses add their seed corpus unless an
+argument names an input file.
 """
 
 from __future__ import annotations
 
+import pathlib
+import shutil
 import sys
+import tempfile
 import traceback
 from collections.abc import Callable
 
@@ -39,6 +43,7 @@ from fuzz_seeds import (
     cyclonedx,
     encoded,
     library,
+    seeded,
 )
 
 from scripts import collect_bypasses, provenance
@@ -236,6 +241,36 @@ print("Bypass oracle against a broken approval verifier")
 rejected("title edited after the label approved", RENAMED_AFTER_LABEL, current_title)
 rejected("title approved without the bypass label", OTHER_LABEL, current_title)
 rejected("rename before the label taken", RENAMED_AROUND_LABEL, first_rename)
+
+
+def arguments(name: str, args: list[str], seeds: bool) -> None:
+    """Fail unless ``seeded`` adds seeds exactly when expected."""
+    result = seeded(args, [b"seed"], "fuzz-replay-corpus-")
+    added = result[len(args) :]
+    if seeds:
+        right = len(added) == 1 and pathlib.Path(added[0]).is_dir()
+        if right:
+            shutil.rmtree(added[0])
+    else:
+        right = not added
+    if result[: len(args)] == args and right:
+        print(f"  ✅ {name}")
+    else:
+        print(f"  ❌ {name}: {args!r} became {result!r}")
+        FAILURES.append(name)
+
+
+print("Seed corpus added to the harness arguments")
+with tempfile.TemporaryDirectory() as scratch:
+    HARNESS = "tests/fuzz_sbom.py"
+    INPUT = pathlib.Path(scratch, "crash-input")
+    INPUT.write_bytes(b"")
+    arguments("no arguments", [HARNESS], seeds=True)
+    arguments("options only", [HARNESS, "-runs=0"], seeds=True)
+    arguments("corpus directory", [HARNESS, "-runs=0", scratch], seeds=True)
+    arguments("missing path", [HARNESS, str(INPUT) + ".absent"], seeds=True)
+    arguments("input file", [HARNESS, str(INPUT)], seeds=False)
+    arguments("directory and file", [HARNESS, scratch, str(INPUT)], seeds=False)
 
 print()
 if FAILURES:

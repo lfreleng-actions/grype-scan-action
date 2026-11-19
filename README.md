@@ -848,5 +848,13 @@ To run a harness by hand on Linux x86_64 with CPython 3.12 to 3.14:
 python3 -m pip install --require-hashes --only-binary=:all: \
   -r tests/fuzz/requirements.txt
 python3 tests/fuzz_sbom.py -max_total_time=60 -timeout=10
+mkdir -p corpus  # libFuzzer needs the directory to exist
+python3 tests/fuzz_sbom.py -max_total_time=60 corpus/  # keep inputs
 python3 tests/fuzz_sbom.py crash-<hash>  # reproduce one input
 ```
+
+A harness given corpus directories adds its seeds after them, and
+libFuzzer writes the inputs it keeps to the first directory, so a
+corpus carried from one run to the next starts from the seeds as well.
+Given an input file, a harness runs the named inputs once and adds no
+seeds.
